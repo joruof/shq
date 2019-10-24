@@ -232,7 +232,7 @@ int main (int argc, char** argv) {
     shm::seg segTest("segment_test", 256);
 
     {
-        shm::send msg("/spatzsim/test2", {
+        shm::send msg("segment_test", {
                 {"aaaa", sizeof(float)},
                 {"y", sizeof(float)},
                 {"z", sizeof(float)}
@@ -244,7 +244,7 @@ int main (int argc, char** argv) {
     }
 
     {
-        shm::recv msg;
+        shm::recv msg("segment_test");
 
         std::cout << msg.at<float>("aaaa") << std::endl;
         std::cout << msg.at<float>("y") << std::endl;
