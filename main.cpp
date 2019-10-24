@@ -191,7 +191,7 @@ namespace shm {
 
         std::unordered_map<std::string, size_t> dataOffsets;
 
-        recv () {
+        recv (std::string segmentName) {
 
             // TODO: real implementation
             uint8_t* ptr = buf;
