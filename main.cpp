@@ -18,8 +18,6 @@ namespace shq {
 
     uint8_t buf[256];
 
-    constexpr size_t maxSegmentSize = 8192;
-
     struct stub {
 
         pthread_mutexattr_t attr;
