@@ -12,7 +12,7 @@
 #include <cstring>
 #include <unordered_map>
 
-namespace shm {
+namespace shq {
 
     typedef std::vector<std::pair<std::string, uint32_t>> def;
 
@@ -25,8 +25,8 @@ namespace shm {
         pthread_mutexattr_t attr;
         pthread_mutex_t mutex;
 
-        uint8_t* startOffset = nullptr;
-        uint8_t* endOffset = nullptr;
+        uint8_t* begin = nullptr;
+        uint8_t* end = nullptr;
         bool wrapped = false;
     };
 
@@ -74,13 +74,14 @@ namespace shm {
                 stb = (stub*)mem;
                 *stb = {};
 
-                // make memory mutex recursive
+                // intialize shared and recursive mutex in stub 
                 pthread_mutexattr_init(&stb->attr);
                 pthread_mutexattr_settype(&stb->attr, PTHREAD_MUTEX_RECURSIVE);
                 pthread_mutexattr_setpshared(&stb->attr, PTHREAD_PROCESS_SHARED);
                 pthread_mutex_init(&stb->mutex, &stb->attr);
 
                 mem += sizeof(stub);
+                std::memset(mem, 0, size);
             } else {
                 // also map and get stub
                 mem = (uint8_t*) mmap(0, actualSize,
@@ -89,63 +90,58 @@ namespace shm {
                 mem += sizeof(stub);
             }
 
-            stb->startOffset = mem;
-            stb->endOffset = mem;
-
-            // write end marker
-            *(uint32_t*)(mem + sizeof(stub) + size) = 0;
+            stb->begin = mem;
+            stb->end = mem;
         }
 
-        uint8_t* alloc (size_t msgSize) { 
+        uint8_t* alloc (size_t chunkSize) { 
 
             pthread_mutex_lock(&stb->mutex);
 
-            size_t actualMsgSize = sizeof(uint32_t) + msgSize;
+            // sizeof(uint32_t) byte for chunk size prefix
+            size_t actualChunkSize = sizeof(uint32_t) + chunkSize;
 
-            if (actualMsgSize > size || msgSize == 0) {
+            // abort if trying to allocate 0 bytes
+            // or if the chunkSize is bigger than the segment 
+            if (actualChunkSize > size || chunkSize == 0) {
                 return nullptr;
             }
 
-            bool done = false;
+            bool foundChunk = false;
 
-            while (!done) {
+            while (!foundChunk) {
+                // optimistic approach to life
+                foundChunk = true; 
 
                 if (stb->wrapped) {
-                    done = stb->startOffset - stb->endOffset >= actualMsgSize;
-                } else if (stb->endOffset + actualMsgSize > mem + size) {
-                    // need to wrap
-                
+                    foundChunk = stb->begin - stb->end >= actualChunkSize;
+                } else if (stb->end + actualChunkSize > mem + size) {
+                    // wrapping needed, check if enough space
+                    foundChunk = stb->begin - mem >= actualChunkSize;
                     // write wrapper marker
-                    *(stb->endOffset) = 0;
-
-                    // check if not enough space, deallocate needed
-                    done = stb->startOffset - mem >= actualMsgSize;
-
-                    stb->endOffset = mem;
+                    *(stb->end) = 0;
+                    stb->end = mem;
                     stb->wrapped = true;
-                } else {
-                    //normal allocation all good
-                    done = true; 
                 }
-
-                if (!done) { 
+                if (!foundChunk) { 
+                    // deallocates the oldest chunk
                     free();
                 }
             }
 
-            uint8_t* ptr = (uint8_t*)(stb->endOffset);
+            uint8_t* ptr = (uint8_t*)(stb->end);
 
             // write message size
-            *(uint32_t*)ptr = msgSize;
+            *(uint32_t*)ptr = chunkSize;
             ptr += sizeof(uint32_t);
 
-            stb->endOffset += actualMsgSize;
+            stb->end += actualChunkSize;
 
             pthread_mutex_unlock(&stb->mutex);
 
             std::cout << "Alloc:" << std::endl;
-            std::cout << "Start offset:" << stb->startOffset - mem << std::endl;
-            std::cout << "End offset:" << stb->endOffset - mem << std::endl;
+            std::cout << "Start offset:" << stb->begin - mem << std::endl;
+            std::cout << "End offset:" << stb->end - mem << std::endl;
             std::cout << "Wrapped:" << stb->wrapped << std::endl;
 
             return ptr;
@@ -155,36 +151,28 @@ namespace shm {
 
             pthread_mutex_lock(&stb->mutex);
 
-            if (stb->endOffset != stb->startOffset || stb->wrapped) { 
+            // read chunk size and mark chunk as deleted
+            uint32_t chunkSize = *(uint32_t*)(stb->begin);
+            *(uint32_t*)(stb->begin) = 0;
 
-                uint32_t* originalMsgSize = (uint32_t*)(stb->startOffset);
-                uint32_t msgSize = *originalMsgSize;
+            if (stb->wrapped && chunkSize == 0) {
+                // if end has already wrapped, and we are
+                // at the wrapping point (indicated by chunkSize of 0)
+                stb->begin = mem;
+                chunkSize = *(uint32_t*)(stb->begin);
+                stb->wrapped = false;
+            } 
 
-                if (stb->wrapped) {
-                    // if end has already wrapped, check if we are
-                    // at the wrapping point (indicated by msgSize of 0)
-                    if (msgSize == 0) {
-                        // yes we are, warp along and update msgSize
-                        stb->startOffset = mem;
-                        msgSize = *(uint32_t*)(stb->startOffset);
-                        stb->wrapped = false;
-                    }
-                } 
-
-                // if this was a non empty chunk deallocate it
-                if (msgSize > 0) {
-                    stb->startOffset += sizeof(uint32_t) + msgSize;
-                }
-
-                // clear chunk
-                *originalMsgSize = 0;
+            // if this was a non empty chunk deallocate it
+            if (chunkSize > 0) {
+                stb->begin += sizeof(uint32_t) + chunkSize;
             }
-
+                     
             pthread_mutex_unlock(&stb->mutex);
 
             std::cout << "Free:" << std::endl;
-            std::cout << "Start offset:" << stb->startOffset - mem << std::endl;
-            std::cout << "End offset:" << stb->endOffset - mem << std::endl;
+            std::cout << "Start offset:" << stb->begin - mem << std::endl;
+            std::cout << "End offset:" << stb->end - mem << std::endl;
             std::cout << "Wrapped:" << stb->wrapped << std::endl;
         }
     };
@@ -299,26 +287,36 @@ namespace shm {
 int main (int argc, char** argv) {
 
     shm_unlink("segment_test");
-
     std::cout << "Test1" << std::endl;
     {
-        shm::seg segTest("segment_test", 36);
-        segTest.alloc(0);
-        segTest.free();
-        segTest.alloc(4);
+        shq::seg segTest("segment_test", 36);
+        segTest.alloc(32);
+        segTest.alloc(32);
+        segTest.alloc(32);
     }
     std::cout << "\n" << std::endl;
 
-    /*
+    shm_unlink("segment_test");
     std::cout << "Test2" << std::endl;
     {
-        shm::seg segTest("segment_test", 36);
+        shq::seg segTest("segment_test", 36);
         segTest.alloc(4);
         segTest.alloc(4);
         segTest.alloc(32);
     }
     std::cout << "\n" << std::endl;
-    */
+
+    shm_unlink("segment_test");
+    std::cout << "Test3" << std::endl;
+    {
+        shq::seg segTest("segment_test", 36);
+        segTest.free();
+        segTest.alloc(32);
+        segTest.free();
+        segTest.free();
+        segTest.alloc(32);
+    }
+    std::cout << "\n" << std::endl;
 
     /*
     {
