@@ -1,15 +1,15 @@
+#include <errno.h>
 #include <fcntl.h>
 #include <unistd.h>
-#include <iostream>
 #include <string.h>
 #include <pthread.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
-#include <errno.h>
 
 #include <tuple>
 #include <vector>
 #include <cstring>
+#include <iostream>
 #include <unordered_map>
 
 namespace shq {
@@ -152,18 +152,17 @@ namespace shq {
 
                 if (!foundChunk) { 
                     if (WAIT == m) {
-                        // wait until other thread removes chunk
+                        // wait until other thread/process removes chunk
                         pthread_cond_wait(&stb->cond, &stb->mutex);
                     } else {
-                        // actively remove chunk
-                        pop(m);
+                        return nullptr;
                     }
                 }
             }
 
             uint8_t* ptr = (uint8_t*)(mem + stb->end);
 
-            // write message size
+            // write chunk size
             *(uint32_t*)ptr = chunkSize;
             ptr += sizeof(uint32_t);
 
@@ -175,12 +174,22 @@ namespace shq {
             return ptr;
         }
 
+        void lock () {
+
+            pthread_mutex_lock(&stb->mutex);
+        }
+
+        void unlock () {
+
+            pthread_mutex_unlock(&stb->mutex);
+            pthread_cond_signal(&stb->cond);
+        }
+
         void pop (mode m = WAIT) { 
 
-            if (WAIT == m) {
-                while (stb->chunkCounter < 1) {
-                    pthread_cond_wait(&stb->cond, &stb->mutex); 
-                }
+            while (WAIT == m && stb->chunkCounter < 1) {
+                // wait until other thread/process adds a chunk
+                pthread_cond_wait(&stb->cond, &stb->mutex); 
             }
 
             uint32_t chunkSize = *(uint32_t*)(mem + stb->begin);
@@ -197,13 +206,23 @@ namespace shq {
             if (chunkSize > 0) {
                 *(uint32_t*)(mem + stb->begin) = 0;
                 stb->begin += sizeof(uint32_t) + chunkSize;
+                stb->chunkCounter = std::max(stb->chunkCounter - 1, (size_t)0);
             }
                      
-            stb->chunkCounter = std::max(stb->chunkCounter - 1, (size_t)0);
-
             pthread_cond_signal(&stb->cond);
         }
-        
+
+        uint8_t* peek (mode m = WAIT) {
+
+            while (stb->chunkCounter < 1) {
+                if (NO_WAIT == m) {
+                    return nullptr;
+                }
+                pthread_cond_wait(&stb->cond, &stb->mutex); 
+            }
+
+            return (uint8_t*)(stb->begin);
+        }
     };
 
     struct send {
@@ -228,6 +247,10 @@ namespace shq {
             // find fitting chunk in shared memory 
             
             uint8_t* ptr = segment.push(msgSize);
+
+            if (ptr == nullptr) {
+                return;
+            }
 
             // write size of following message segment
 
@@ -271,7 +294,7 @@ namespace shq {
 
         std::unordered_map<std::string, size_t> dataOffsets;
 
-        recv (std::string segmentName) {
+        recv (seg& segment) {
 
             // TODO: real implementation
             uint8_t* ptr = buf;
