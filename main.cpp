@@ -137,11 +137,6 @@ namespace shq {
 
             pthread_mutex_unlock(&stb->mutex);
 
-            std::cout << "Alloc:" << std::endl;
-            std::cout << "Start offset:" << stb->begin - mem << std::endl;
-            std::cout << "End offset:" << stb->end - mem << std::endl;
-            std::cout << "Wrapped:" << stb->wrapped << std::endl;
-
             return ptr;
         }
 
@@ -167,11 +162,38 @@ namespace shq {
             }
                      
             pthread_mutex_unlock(&stb->mutex);
+        }
 
-            std::cout << "Free:" << std::endl;
-            std::cout << "Start offset:" << stb->begin - mem << std::endl;
-            std::cout << "End offset:" << stb->end - mem << std::endl;
-            std::cout << "Wrapped:" << stb->wrapped << std::endl;
+        void print () { 
+
+            pthread_mutex_lock(&stb->mutex);
+
+            uint8_t* ptr = stb->begin;
+            bool wrapped = stb->wrapped;
+
+            std::vector<size_t> chunkSizes;
+
+            while (wrapped || ptr != stb->end) {
+                uint32_t chunkSize = *(uint32_t*)(ptr);
+                if (stb->wrapped && 0 == chunkSize) {
+                    ptr = mem;
+                    wrapped = false;
+                } else {
+                    chunkSizes.push_back(chunkSize);
+                    ptr += sizeof(uint32_t) + chunkSize;
+                }
+            }
+
+            std::cout << "Found "
+                << chunkSizes.size()
+                << (chunkSizes.size() == 1 ? " chunk:" : " chunks:")
+                << std::endl;
+
+            for (int i = 0; i < chunkSizes.size(); ++i) { 
+                std::cout << "    Chunk " << i << ": " << chunkSizes[i] << " bytes" << std::endl;
+            }
+
+            pthread_mutex_unlock(&stb->mutex);
         }
     };
 
@@ -285,27 +307,34 @@ namespace shq {
 int main (int argc, char** argv) {
 
     shm_unlink("segment_test");
-    std::cout << "Test1" << std::endl;
+    std::cout << "[Test 0]" << std::endl;
     {
         shq::seg segTest("segment_test", 36);
         segTest.alloc(32);
         segTest.alloc(32);
         segTest.alloc(32);
+
+        segTest.print();
     }
-    std::cout << "\n" << std::endl;
+    std::cout << "\n";
 
     shm_unlink("segment_test");
-    std::cout << "Test2" << std::endl;
+    std::cout << "[Test 1]" << std::endl;
     {
         shq::seg segTest("segment_test", 36);
         segTest.alloc(4);
-        segTest.alloc(4);
+        segTest.alloc(5);
+
+        segTest.print();
+
         segTest.alloc(32);
+
+        segTest.print();
     }
-    std::cout << "\n" << std::endl;
+    std::cout << "\n";
 
     shm_unlink("segment_test");
-    std::cout << "Test3" << std::endl;
+    std::cout << "[Test 2]" << std::endl;
     {
         shq::seg segTest("segment_test", 36);
         segTest.free();
@@ -313,8 +342,10 @@ int main (int argc, char** argv) {
         segTest.free();
         segTest.free();
         segTest.alloc(32);
+
+        segTest.print();
     }
-    std::cout << "\n" << std::endl;
+    std::cout << "\n";
 
     /*
     {
