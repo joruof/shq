@@ -16,8 +16,6 @@ namespace shq {
 
     typedef std::vector<std::pair<std::string, uint32_t>> def;
 
-    uint8_t buf[256];
-
     struct stub {
 
         pthread_mutexattr_t mutexAttr;
@@ -91,6 +89,7 @@ namespace shq {
                 pthread_mutexattr_init(&stb->mutexAttr);
                 pthread_mutexattr_settype(&stb->mutexAttr, PTHREAD_MUTEX_RECURSIVE);
                 pthread_mutexattr_setpshared(&stb->mutexAttr, PTHREAD_PROCESS_SHARED);
+                pthread_mutexattr_setrobust(&stb->mutexAttr, PTHREAD_MUTEX_ROBUST);
                 pthread_mutex_init(&stb->mutex, &stb->mutexAttr);
                 // intialize shared condition in stub
                 pthread_condattr_init(&stb->condAttr);
@@ -111,13 +110,10 @@ namespace shq {
                 stb = (stub*)mem;
                 mem += sizeof(stub);
             }
-
-            pthread_mutex_lock(&stb->mutex);
         }
 
         ~seg () {
 
-            pthread_mutex_unlock(&stb->mutex);
             munmap(mem - sizeof(stub), size);
             close(fd);
         }
@@ -169,14 +165,14 @@ namespace shq {
             stb->end += actualChunkSize;
             stb->chunkCounter += 1;
 
-            pthread_cond_signal(&stb->cond);
-
             return ptr;
         }
 
         void lock () {
 
-            pthread_mutex_lock(&stb->mutex);
+            if (PTHREAD_MUTEX_ROBUST == pthread_mutex_lock(&stb->mutex)) { 
+                pthread_mutex_consistent(&stb->mutex);
+            }
         }
 
         void unlock () {
@@ -208,8 +204,6 @@ namespace shq {
                 stb->begin += sizeof(uint32_t) + chunkSize;
                 stb->chunkCounter = std::max(stb->chunkCounter - 1, (size_t)0);
             }
-                     
-            pthread_cond_signal(&stb->cond);
         }
 
         uint8_t* peek (mode m = WAIT) {
@@ -221,15 +215,30 @@ namespace shq {
                 pthread_cond_wait(&stb->cond, &stb->mutex); 
             }
 
-            return (uint8_t*)(stb->begin);
+            size_t readPosition = stb->begin;
+            uint32_t chunkSize = *(uint32_t*)(mem + readPosition);
+
+            if (stb->wrapped && chunkSize == 0) {
+                readPosition = 0;
+            } 
+
+            return (uint8_t*)(mem + readPosition);
         }
     };
 
-    struct send {
+    class send {
 
         std::unordered_map<std::string, size_t> dataOffsets;
 
-        send (seg& segment, def d) { 
+        bool isOk = true;
+
+        uint8_t* basePtr = nullptr;
+
+        seg& segment;
+
+    public:
+
+        send (seg& segment, def d, mode m = WAIT) : segment{segment} { 
 
             uint32_t msgSize = 0;
 
@@ -246,16 +255,15 @@ namespace shq {
 
             // find fitting chunk in shared memory 
             
-            uint8_t* ptr = segment.push(msgSize);
+            segment.lock();
 
-            if (ptr == nullptr) {
+            basePtr = segment.push(msgSize, m);
+            uint8_t* ptr = basePtr;
+
+            if (nullptr == ptr) {
+                isOk = false;
                 return;
             }
-
-            // write size of following message segment
-
-            *(uint32_t*)ptr = msgSize;
-            ptr += sizeof(uint32_t);
 
             // initialize frame to hold data
 
@@ -278,31 +286,58 @@ namespace shq {
                 ptr += sizeof(uint32_t);
 
                 // store offset to buffer start
-                dataOffsets[entryName] = ptr - buf;
+                dataOffsets[entryName] = ptr - basePtr;
                 ptr += entryDataLen;
             }
+        }
+
+        ~send () {
+
+            segment.unlock();
         }
 
         template<typename T>
         T& at(std::string entryName) {
 
-            return (T&) *(buf + dataOffsets.at(entryName));
+            return (T&) *(basePtr + dataOffsets.at(entryName));
+        }
+
+        bool ok () {
+
+            return isOk;
         }
     };
 
-    struct recv { 
+    class recv { 
 
         std::unordered_map<std::string, size_t> dataOffsets;
 
-        recv (seg& segment) {
+        bool isOk = true;
 
-            // TODO: real implementation
-            uint8_t* ptr = buf;
+        mode m = WAIT;
 
-            uint32_t msgSize = *(uint32_t*)buf;
+        seg& segment;
+
+        uint8_t* basePtr;
+
+    public:
+
+        recv (seg& segment, mode m = WAIT) : segment{segment} {
+
+            segment.lock();
+
+            basePtr = segment.peek(m);
+            uint8_t* ptr = basePtr;
+
+            if (nullptr == ptr) {
+                isOk = false;
+                return;
+            }
+
+            uint32_t msgSize = *(uint32_t*)ptr;
             ptr += sizeof(uint32_t);
 
-            while (ptr - buf < msgSize + sizeof(uint32_t)) { 
+            while (ptr - basePtr < msgSize + sizeof(uint32_t)) { 
 
                 // read name size
                 uint8_t entryNameLen = *ptr;
@@ -317,7 +352,7 @@ namespace shq {
                 ptr += sizeof(uint32_t);
 
                 // read data offset relative to buffer start
-                dataOffsets[entryName] = ptr - buf;
+                dataOffsets[entryName] = ptr - basePtr;
                 ptr += entryDataLen;
             }
         }
@@ -325,7 +360,18 @@ namespace shq {
         template<typename T>
         T& at(std::string entryName) {
 
-            return (T&) *(buf + dataOffsets.at(entryName));
+            return (T&) *(basePtr + dataOffsets.at(entryName));
+        }
+
+        ~recv () {
+            
+            segment.pop();
+            segment.unlock();
+        }
+
+        bool ok () {
+
+            return isOk;
         }
     };
 }

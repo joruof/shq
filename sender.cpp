@@ -4,17 +4,19 @@ int main(int argc, char** argv) {
 
     shm_unlink("segment_test");
 
-    int i = 0;
-
-    shq::seg test("segment_test", 8192);
-    test.unlock();
+    shq::seg testSegment("segment_test", 8192);
+    shq::def testDef = {
+            {"aaaa", sizeof(float)},
+            {"y", sizeof(float)},
+            {"z", sizeof(float)}
+        };
 
     while (true) {
 
-        test.lock();
-        test.push(64, shq::NO_WAIT);
-        test.unlock();
-        //std::cout << "i:" << i++ << std::endl;
-        //std::cout << test << std::endl;
+        shq::send msg(testSegment, testDef);
+
+        msg.at<float>("aaaa") = 42.0;
+        msg.at<float>("y") = 78.0;
+        msg.at<float>("z") = 89.0;
     }
 }
