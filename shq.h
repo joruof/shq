@@ -172,6 +172,7 @@ namespace shq {
 
             if (PTHREAD_MUTEX_ROBUST == pthread_mutex_lock(&stb->mutex)) { 
                 pthread_mutex_consistent(&stb->mutex);
+                std::cout << "made consistent" << std::endl;
             }
         }
 
@@ -365,7 +366,7 @@ namespace shq {
 
         ~recv () {
             
-            segment.pop();
+            segment.pop(m);
             segment.unlock();
         }
 
@@ -382,7 +383,7 @@ namespace shq {
  */
 std::ostream& operator<<(std::ostream& os, shq::seg& s) {
 
-    pthread_mutex_lock(&s.stb->mutex);
+   // pthread_mutex_lock(&s.stb->mutex);
 
     os << "Segment state:" << std::endl;
     os << "    Begin: " << s.stb->begin << std::endl;
@@ -423,7 +424,7 @@ std::ostream& operator<<(std::ostream& os, shq::seg& s) {
        << memoryUsage << "/" << s.size
        << " bytes";
 
-    pthread_mutex_unlock(&s.stb->mutex);
+    //pthread_mutex_unlock(&s.stb->mutex);
 
     return os;
 }

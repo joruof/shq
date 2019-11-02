@@ -4,7 +4,7 @@ int main(int argc, char** argv) {
 
     shm_unlink("segment_test");
 
-    shq::seg testSegment("segment_test", 8192);
+    shq::seg testSegment("segment_test", 128);
     shq::def testDef = {
             {"aaaa", sizeof(float)},
             {"y", sizeof(float)},
@@ -13,10 +13,12 @@ int main(int argc, char** argv) {
 
     while (true) {
 
-        shq::send msg(testSegment, testDef);
+        shq::send msg(testSegment, testDef, shq::NO_WAIT);
 
-        msg.at<float>("aaaa") = 42.0;
-        msg.at<float>("y") = 78.0;
-        msg.at<float>("z") = 89.0;
+        if (msg.ok()) {
+            msg.at<float>("aaaa") = 42.0;
+            msg.at<float>("y") = 78.0;
+            msg.at<float>("z") = 89.0;
+        }
     }
 }

@@ -7,7 +7,7 @@ int main(int argc, char** argv) {
 
     auto start = std::chrono::high_resolution_clock::now();
 
-    shq::seg test("segment_test", 8192);
+    shq::seg test("segment_test", 128);
 
     std::cout << test << std::endl;
 
