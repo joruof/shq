@@ -16,6 +16,29 @@ namespace shq {
 
     typedef std::vector<std::pair<std::string, uint32_t>> def;
 
+    /*
+    // used to make mutexes robust and shared
+    pthread_mutexattr_t mutexAttr;
+
+    // locked on allocation/deallocation
+    pthread_mutex_t mutex;
+
+    // locked if reader present
+    pthread_mutex_t readerMutex;
+    
+    // locked if writer present
+    pthread_mutex_t writerMutex;
+
+    // used to make conditions shared
+    pthread_condattr_t condAttr;
+
+    // condition the reader can wait on
+    pthread_cond_t readerCond;
+
+    // condition the writer can wait on
+    pthread_cond_t writerCond;
+    */
+
     struct stub {
 
         pthread_mutexattr_t mutexAttr;
@@ -28,12 +51,6 @@ namespace shq {
         bool wrapped = false;
 
         size_t chunkCounter = 0;
-    };
-
-    enum mode { 
-
-        WAIT,
-        NO_WAIT
     };
 
     struct seg {
@@ -99,7 +116,7 @@ namespace shq {
                 mem += sizeof(stub);
                 std::memset(mem, 0, size);
             } else {
-                // reuse old segment
+                // reusing already created segment
                 mem = (uint8_t*) mmap(0, actualSize,
                         PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
                 if (MAP_FAILED == mem) {
@@ -151,6 +168,7 @@ namespace shq {
                         // wait until other thread/process removes chunk
                         pthread_cond_wait(&stb->cond, &stb->mutex);
                     } else {
+                        // or don't wait if NO_WAIT is set
                         return nullptr;
                     }
                 }
