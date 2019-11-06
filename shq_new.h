@@ -176,7 +176,103 @@ namespace shq {
 
         bool empty () {
 
-            return hdr->wrapped || hdr->begin != hdr->end;
+            return !hdr->wrapped && hdr->begin == hdr->end;
+        }
+
+        int lock () {
+
+            return robustLock(&hdr->mutex, blocking);
+        }
+
+        uint8_t* push (size_t chunkSize) { 
+
+            // sizeof(uint32_t) byte for chunk size prefix
+            size_t actualChunkSize = sizeof(uint32_t) + chunkSize;
+
+            // abort if trying to allocate 0 bytes
+            // or if the chunkSize is bigger than the segment 
+            if (actualChunkSize > size || chunkSize == 0) {
+                return nullptr;
+            }
+
+            bool newWrapped = hdr->wrapped;
+            bool newBegin = hdr->begin;
+            bool newEnd = hdr->end;
+
+            bool foundChunk = false;
+
+            while (!foundChunk) {
+
+                if (hdr->wrapped) {
+                    if (hdr->begin - hdr->end >= actualChunkSize) {
+                        foundChunk = true;
+                    }
+                } else if (hdr->end + actualChunkSize > size) {
+                    // wrapping needed, check if enough space
+                    if (hdr->begin >= actualChunkSize) {
+                        // write wrapping marker
+                        *(memory + hdr->end) = 0;
+                        hdr->end = 0;
+                        hdr->wrapped = true;
+                        foundChunk = true;
+                    }
+                } else { 
+                    foundChunk = true;
+                }
+
+                if (!foundChunk) { 
+                    if (!blocking) {
+                        return nullptr;
+                    }
+                    int resultWait = pthread_cond_wait(
+                            &hdr->writerCond, &hdr->mutex); 
+                    if (EOWNERDEAD == resultWait) {
+                        pthread_mutex_consistent(&hdr->mutex);
+                    }
+                }
+            }
+
+            uint8_t* ptr = (uint8_t*)(memory + hdr->end);
+
+            // write chunk size
+            *(uint32_t*)ptr = chunkSize;
+            ptr += sizeof(uint32_t);
+
+            hdr->end += actualChunkSize;
+
+            return ptr;
+        }
+
+        uint8_t* pop (size_t& chunkSize) { 
+
+            while (empty()) {
+                if (!blocking) {
+                    return nullptr;
+                }
+                // wait until other thread/process adds a chunk
+                int resultWait = pthread_cond_wait(
+                        &hdr->readerCond, &hdr->mutex); 
+                if (EOWNERDEAD == resultWait) {
+                    pthread_mutex_consistent(&hdr->mutex);
+                }
+            }
+
+            chunkSize = *(uint32_t*)(memory + hdr->begin);
+
+            if (hdr->wrapped && chunkSize == 0) {
+                // if end has already wrapped, and we are
+                // at the wrapping point (indicated by chunkSize of 0)
+                hdr->begin = 0;
+                chunkSize = *(uint32_t*)(memory + hdr->begin);
+                hdr->wrapped = false;
+            } 
+
+            // TODO: test this!
+
+            uint8_t* ptr = memory + hdr->begin + sizeof(uint32_t);
+            hdr->begin += sizeof(uint32_t) + chunkSize;
+
+            return ptr;
         }
     };
 
@@ -199,8 +295,8 @@ namespace shq {
                 robustLock(&hdr->mutex);
                 // This fixes broken condition variables, which sometimes
                 // occur, if the process died while waiting on a condition.
-                pthread_cond_init(&stb->readerCond, &stb->condAttr);
-                pthread_mutex_unlock(&hdr->readerMutex);
+                pthread_cond_init(&hdr->readerCond, &hdr->condAttr);
+                pthread_mutex_unlock(&hdr->mutex);
             }
         }
 
@@ -208,6 +304,93 @@ namespace shq {
 
             // unregister as reader
             pthread_mutex_unlock(&hdr->readerMutex);
+        }
+    };
+
+    struct writer : segment {
+
+        writer (const char* name, const size_t size, bool blocking = true)
+            : segment(name, size, blocking) {
+
+            // (Try to) register as a reader
+            int lockResult = robustLock(&hdr->writerMutex, blocking);
+
+            if (EBUSY == lockResult) { 
+                throw std::runtime_error(
+                        "Another writer already connected to segment!");
+            }
+
+            if (EOWNERDEAD == lockResult) { 
+                // Is ignoring "blocking", but no way not to block here
+                // without risking huge inconsistencies.
+                robustLock(&hdr->mutex);
+                // This fixes broken condition variables, which sometimes
+                // occur, if the process died while waiting on a condition.
+                pthread_cond_init(&hdr->writerCond, &hdr->condAttr);
+                pthread_mutex_unlock(&hdr->mutex);
+            }
+        }
+
+        ~writer () { 
+
+            // unregister as reader
+            pthread_mutex_unlock(&hdr->writerMutex);
+        }
+    };
+
+    struct message {
+
+        segment& seg;
+        bool ok;
+
+        message (reader& rdr) : seg{rdr} { 
+
+            int resultLock = seg.lock();
+            if (EBUSY == resultLock) {
+                ok = false;
+                return;
+            }
+
+            while (seg.hdr->begin < 1) { 
+                if (!seg.blocking) {
+                    ok = false;
+                    return;
+                }
+                int resultWait = pthread_cond_wait(
+                        &seg.hdr->readerCond, &seg.hdr->mutex); 
+                if (EOWNERDEAD == resultWait) {
+                    pthread_mutex_consistent(&seg.hdr->mutex);
+                }
+            }
+        }
+        
+        message (writer& wtr) : seg{wtr} {
+
+            int resultLock = seg.lock();
+            if (EBUSY == resultLock) {
+                ok = false;
+                return;
+            }
+
+            while (seg.hdr->begin > 5) { 
+                if (!seg.blocking) {
+                    ok = false;
+                    return;
+                }
+                int resultWait = pthread_cond_wait(
+                        &seg.hdr->writerCond, &seg.hdr->mutex); 
+                if (EOWNERDEAD == resultWait) {
+                    pthread_mutex_consistent(&seg.hdr->mutex);
+                }
+            }
+        }
+
+        ~message () {
+
+            // notify the other side
+            pthread_cond_signal(&seg.hdr->writerCond);
+            pthread_cond_signal(&seg.hdr->readerCond);
+            pthread_mutex_unlock(&seg.hdr->mutex);
         }
     };
 
