@@ -6,7 +6,10 @@
 #include <sys/mman.h>
 #include <sys/stat.h>
 
+#include <tuple>
+#include <vector>
 #include <cstring>
+#include <unordered_map>
 
 namespace shq {
 
@@ -29,6 +32,11 @@ namespace shq {
 
         return lockResult;
     }
+
+    /*
+     * Message definition as a list of (name, size) pairs.
+     */
+    typedef std::vector<std::pair<std::string, uint32_t>> definition;
 
     /*
      * Header contains necessary synchronization data.
@@ -78,6 +86,9 @@ namespace shq {
         // actual size of the shared memory segment
         size_t size;
 
+        // actually usable size of the shared memory segment
+        size_t usableSize;
+
         // name of the shared memory segment
         std::string name;
 
@@ -91,6 +102,7 @@ namespace shq {
             : descriptor{shm_open(name, O_RDWR, 0666)},
               memory{nullptr},
               size{sizeof(header) + size + sizeof(uint32_t)},
+              usableSize{size},
               name{name},
               blocking{blocking} {
 
@@ -191,13 +203,9 @@ namespace shq {
 
             // abort if trying to allocate 0 bytes
             // or if the chunkSize is bigger than the segment 
-            if (actualChunkSize > size || chunkSize == 0) {
+            if (actualChunkSize > usableSize || chunkSize == 0) {
                 return nullptr;
             }
-
-            bool newWrapped = hdr->wrapped;
-            bool newBegin = hdr->begin;
-            bool newEnd = hdr->end;
 
             bool foundChunk = false;
 
@@ -207,7 +215,7 @@ namespace shq {
                     if (hdr->begin - hdr->end >= actualChunkSize) {
                         foundChunk = true;
                     }
-                } else if (hdr->end + actualChunkSize > size) {
+                } else if (hdr->end + actualChunkSize > usableSize) {
                     // wrapping needed, check if enough space
                     if (hdr->begin >= actualChunkSize) {
                         // write wrapping marker
@@ -338,50 +346,127 @@ namespace shq {
         }
     };
 
+    /*
+     * The message type is used to conveniently operate on segments.
+     */
     struct message {
 
+        // stores the offset from the beginning of the message
+        // memory chunk for the corresponding field name
+        std::unordered_map<std::string, size_t> dataOffsets;
+
+        // reference to the shared memory segment
         segment& seg;
-        bool ok;
+
+        // used in non-blocking mode to check
+        // if the message actually contains something
+        bool isOk = true;
+
+        // points to the (shared) memory chunk of the message
+        uint8_t* basePtr = nullptr;
+
+        // size used by message in shared memory
+        size_t size = 0;
 
         message (reader& rdr) : seg{rdr} { 
 
-            int resultLock = seg.lock();
-            if (EBUSY == resultLock) {
-                ok = false;
+            // try to acquire segment-wide lock
+
+            if (EBUSY == seg.lock()) {
+                // in non-blocking mode
+                isOk = false;
                 return;
             }
 
-            while (seg.hdr->begin < 1) { 
-                if (!seg.blocking) {
-                    ok = false;
-                    return;
-                }
-                int resultWait = pthread_cond_wait(
-                        &seg.hdr->readerCond, &seg.hdr->mutex); 
-                if (EOWNERDEAD == resultWait) {
-                    pthread_mutex_consistent(&seg.hdr->mutex);
-                }
+            // try to pop chunk, may block until chunk available
+
+            size = 0;
+            basePtr = seg.pop(size);
+            if (nullptr == basePtr) {
+                // in non-blocking mode
+                isOk = false;
+                return;
+            }
+
+            uint8_t* ptr = basePtr;
+
+            while (ptr - basePtr < size + sizeof(uint32_t)) { 
+
+                // read name size
+                uint8_t entryNameLen = *ptr;
+                ptr += sizeof(uint8_t);
+
+                // read name
+                std::string entryName((char*)ptr, entryNameLen);
+                ptr += entryNameLen;
+
+                // read data size
+                uint32_t entryDataLen = *(uint32_t*)ptr;
+                ptr += sizeof(uint32_t);
+
+                // read data offset relative to buffer start
+                dataOffsets[entryName] = ptr - basePtr;
+                ptr += entryDataLen;
             }
         }
         
-        message (writer& wtr) : seg{wtr} {
+        message (writer& wtr, definition def) : seg{wtr} {
 
-            int resultLock = seg.lock();
-            if (EBUSY == resultLock) {
-                ok = false;
+            // first calculate message size from message definition
+
+            for (std::pair<std::string, uint32_t>& entry : def) {
+                // name size
+                size += sizeof(uint8_t);
+                // name 
+                size += std::get<0>(entry).length();
+                // data size
+                size += sizeof(uint32_t);
+                // data
+                size += std::get<1>(entry);
+            }
+
+            // try to acquire segment-wide lock
+
+            if (EBUSY == seg.lock()) {
+                // in non-blocking mode
+                isOk = false;
                 return;
             }
 
-            while (seg.hdr->begin > 5) { 
-                if (!seg.blocking) {
-                    ok = false;
-                    return;
-                }
-                int resultWait = pthread_cond_wait(
-                        &seg.hdr->writerCond, &seg.hdr->mutex); 
-                if (EOWNERDEAD == resultWait) {
-                    pthread_mutex_consistent(&seg.hdr->mutex);
-                }
+            // try to allocate memory, may block until chunk available
+
+            basePtr = seg.push(size);
+            if (nullptr == basePtr) {
+                // in non-blocking mode
+                isOk = false;
+                return;
+            }
+
+            uint8_t* ptr = basePtr;
+
+            // initialize frame in chunk to hold data
+
+            for (std::pair<std::string, uint32_t>& entry : def) {
+
+                std::string& entryName = std::get<0>(entry);
+                uint8_t entryNameLen = entryName.length();
+                uint32_t entryDataLen = std::get<1>(entry);
+
+                // write name size
+                *(uint8_t*)ptr = entryNameLen;
+                ptr += sizeof(uint8_t);
+
+                // write name
+                memcpy(ptr, entryName.c_str(), entryNameLen);
+                ptr += entryNameLen;
+
+                // write data size 
+                *(uint32_t*)ptr = entryDataLen;
+                ptr += sizeof(uint32_t);
+
+                // store offset to buffer start
+                dataOffsets[entryName] = ptr - basePtr;
+                ptr += entryDataLen;
             }
         }
 
@@ -392,18 +477,16 @@ namespace shq {
             pthread_cond_signal(&seg.hdr->readerCond);
             pthread_mutex_unlock(&seg.hdr->mutex);
         }
+
+        bool ok () {
+
+            return isOk;
+        }
+
+        template<typename T>
+        T& at(std::string entryName) {
+
+            return (T&) *(basePtr + dataOffsets.at(entryName));
+        }
     };
-
-    /*
-    int initSegment () {
-
-        return 0;
-    }
-
-    int destroySegment () {
-
-        return 0;
-    }
-    */
-
 }

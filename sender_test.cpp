@@ -5,17 +5,19 @@ int main (int argc, char** argv) {
 
     shm_unlink("cond_lock_test");
 
-    shq::writer writer("cond_lock_test", 10);
-    shq::header* stb = writer.hdr;
+    shq::writer writer("cond_lock_test", 128);
+
+    shq::definition def = {
+        {"a", sizeof(float)}
+    };
+
+    int i = 0;
 
     while (true) { 
 
-        usleep(1000000);
+        //usleep(100000);
 
-        shq::message msg(writer);
-
-        std::cout << "state: " << stb->begin << " -> ";
-        stb->begin += 1;
-        std::cout << stb->begin << std::endl;
+        shq::message msg(writer, def);
+        msg.at<float>("a") = i++;
     }
 }
