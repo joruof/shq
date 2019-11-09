@@ -1,5 +1,4 @@
 #include <iostream>
-
 #include "shq_new.h"
 
 int main(int argc, char** argv) {
@@ -10,5 +9,6 @@ int main(int argc, char** argv) {
 
         shq::message msg(reader);
         std::cout << msg.at<float>("a") << std::endl;
+        std::cout << msg.at<uint8_t>("b") << std::endl;
     }
 }

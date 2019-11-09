@@ -1,15 +1,18 @@
 #include <iostream> 
 #include "shq_new.h"
 
+#include <atomic>
+
 int main (int argc, char** argv) {
 
     shm_unlink("cond_lock_test");
 
-    shq::writer writer("cond_lock_test", 128);
-
     shq::definition def = {
-        {"a", sizeof(float)}
-    };
+            {"a", sizeof(float)},
+            {"b", sizeof(uint8_t)}
+        };
+
+    shq::writer writer("cond_lock_test", 128);
 
     int i = 0;
 
@@ -19,5 +22,6 @@ int main (int argc, char** argv) {
 
         shq::message msg(writer, def);
         msg.at<float>("a") = i++;
+        msg.at<uint8_t>("b") = 'a';
     }
 }
