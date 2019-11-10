@@ -1,14 +1,13 @@
 #include <iostream>
-#include "shq_new.h"
+#include "shq.h"
 
 int main(int argc, char** argv) {
 
-    shq::reader reader("cond_lock_test", 128);
+    shq::reader reader("shq_counter_demo", 230);
 
-    while (true) { 
+    for (int i = 0; i < 100; i++) { 
 
         shq::message msg(reader);
-        std::cout << msg.at<float>("a") << std::endl;
-        std::cout << msg.at<uint8_t>("b") << std::endl;
+        std::cout << msg.has("time") << std::endl;
     }
 }

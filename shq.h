@@ -8,80 +8,148 @@
 
 #include <tuple>
 #include <vector>
+#include <atomic>
 #include <cstring>
-#include <iostream>
 #include <unordered_map>
 
 namespace shq {
 
-    typedef std::vector<std::pair<std::string, uint32_t>> def;
+    /*
+     * Helper method, locks mutex and fixes state, if previous owner died.
+     */
+    int robustLock (pthread_mutex_t* mutex, bool blocking = true) {
+
+        int lockResult;
+
+        if (blocking) { 
+            lockResult = pthread_mutex_lock(mutex);
+        } else { 
+            lockResult = pthread_mutex_trylock(mutex);
+        }
+
+        if (EOWNERDEAD == lockResult) {
+            pthread_mutex_consistent(mutex);
+        }
+
+        return lockResult;
+    }
 
     /*
-    // used to make mutexes robust and shared
-    pthread_mutexattr_t mutexAttr;
+     * This contains the state of the ring buffer
+     * in 64 bit, which allows atomic access.
+     *
+     * This means that the largest usable size of a
+     * single shared memory segment is limited to ~2.1 GB.
+     */ 
+    struct ring_buffer { 
 
-    // locked on allocation/deallocation
-    pthread_mutex_t mutex;
-
-    // locked if reader present
-    pthread_mutex_t readerMutex;
-    
-    // locked if writer present
-    pthread_mutex_t writerMutex;
-
-    // used to make conditions shared
-    pthread_condattr_t condAttr;
-
-    // condition the reader can wait on
-    pthread_cond_t readerCond;
-
-    // condition the writer can wait on
-    pthread_cond_t writerCond;
-    */
-
-    struct stub {
-
-        pthread_mutexattr_t mutexAttr;
-        pthread_mutex_t mutex;
-        pthread_condattr_t condAttr;
-        pthread_cond_t cond;
-
-        size_t begin = 0;
-        size_t end = 0;
-        bool wrapped = false;
-
-        size_t chunkCounter = 0;
+        uint64_t 
+            // begin of the allocation in the ring buffer
+            begin : 31,
+            // end of the allocation in the ring buffer
+            end : 31,
+            // is 1 if the allocation is wrapped (end < begin)
+            wrapped : 2;
     };
 
-    struct seg {
+    /*
+     * Header contains necessary synchronization data.
+     * Written to the beginning of the shared memory segment.
+     */
+    struct header {
 
-        int fd;
-        uint8_t* mem;
+        // the total size of the shared memory segment
         size_t size;
-        std::string name;
-        stub* stb;
+
+        // used to init robust and shared mutexes
+        pthread_mutexattr_t mutexAttr;
+
+        // locked on allocation/deallocation
+        pthread_mutex_t mutex;
+
+        // locked if reader present
+        pthread_mutex_t readerMutex;
         
-        seg (const char* name, const size_t size) 
-            : fd{shm_open(name, O_RDWR, 0777)},
-              mem{nullptr},
-              size{size},
-              name{name} {
+        // locked if writer present
+        pthread_mutex_t writerMutex;
 
-            // memory management info + actual buffer size + end marker
-            size_t actualSize = sizeof(stub) + size + sizeof(uint32_t);
+        // used to (re-)init shared condition variables
+        pthread_condattr_t condAttr;
 
-            if (0 > fd) {
+        // condition the reader can wait on
+        pthread_cond_t readerCond;
+
+        // condition the writer can wait on
+        pthread_cond_t writerCond;
+
+        // contains the state of the ring buffer
+        std::atomic<ring_buffer> rb;
+    };
+
+    class segment {
+
+        // file descriptor of shared memory segment
+        int descriptor;
+
+        // total size of the shared memory segment
+        size_t size;
+
+        // actual usable size of the shared memory segment
+        size_t usableSize;
+
+        // name of the shared memory segment
+        std::string name;
+
+        // pointer into the shared memory
+        uint8_t* memory;
+
+        // header used for synchronization
+        header* hdr;
+
+        // points to the reader/writer mutex in shared memory
+        pthread_mutex_t* roleMutexPtr;
+
+        // points to the reader/writer condition in shared memory
+        pthread_cond_t* roleCondPtr;
+
+        // whether to wait for locks or return with error instead
+        bool blocking;
+
+        // true if this is a reader segment, false if writer
+        bool reader;
+
+    public:
+
+        segment (const char* name, 
+                 const size_t usableSize, 
+                 bool reader = true, 
+                 bool blocking = true) 
+            : descriptor{shm_open(name, O_RDWR, 0666)},
+              memory{nullptr},
+              hdr{nullptr},
+              size{sizeof(header) + usableSize + sizeof(uint32_t)},
+              usableSize{usableSize},
+              name{name},
+              blocking{blocking},
+              reader{reader} {
+
+            if (-1 != descriptor) {
+                // opening succeeded, reusing already created segment
+                openMemory();
+            } else {
                 // we need a new segment
-                fd = shm_open(name, O_CREAT | O_RDWR, 0777);
-                if (0 > fd) {
+                descriptor = shm_open(name, O_CREAT | O_RDWR, 0666);
+
+                if (0 > descriptor) {
                     throw std::runtime_error(
                             std::string("Creating shared memory segment \"")
                             + std::string(name)
                             + std::string("\" failed: ")
                             + std::strerror(errno));
                 }
-                // creation done, resize shared memory segment
-                if (0 > ftruncate(fd, actualSize)) { 
+
+                // creation done, resizing to proper size
+                if (0 > ftruncate(descriptor, size)) { 
                     throw std::runtime_error(
                             std::string("Resizing shared memory segment \"")
                             + std::string(name)
@@ -90,273 +158,351 @@ namespace shq {
                             + std::string(" bytes failed: ")
                             + std::strerror(errno));
                 }
-                // map and initialize new memory management stub
-                mem = (uint8_t*) mmap(0, actualSize,
-                        PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
-                if (MAP_FAILED == mem) {
+
+                openMemory();
+
+                // initialize header
+                
+                hdr->size = size;
+                
+                ring_buffer rb = hdr->rb;
+                rb.begin = 0;
+                rb.end = 0;
+                rb.wrapped = 0;
+                hdr->rb = rb;
+                
+                pthread_mutexattr_init(&hdr->mutexAttr);
+                pthread_mutexattr_setpshared(
+                        &hdr->mutexAttr, PTHREAD_PROCESS_SHARED);
+                pthread_mutexattr_setrobust(
+                        &hdr->mutexAttr, PTHREAD_MUTEX_ROBUST);
+
+                pthread_mutex_init(&hdr->mutex, &hdr->mutexAttr);
+                pthread_mutex_init(&hdr->readerMutex, &hdr->mutexAttr);
+                pthread_mutex_init(&hdr->writerMutex, &hdr->mutexAttr);
+
+                pthread_condattr_init(&hdr->condAttr);
+                pthread_condattr_setpshared(
+                        &hdr->condAttr, PTHREAD_PROCESS_SHARED);
+
+                pthread_cond_init(&hdr->readerCond, &hdr->condAttr);
+                pthread_cond_init(&hdr->writerCond, &hdr->condAttr);
+            }
+
+            // (try to) register as a reader/writer
+            
+            int lockResult = robustLock(roleMutexPtr, blocking);
+
+            if (EBUSY == lockResult) { 
+                throw std::runtime_error(std::string("Another ")
+                        + (reader ? "reader" : "writer")
+                        + " has already connected to the segment!");
+            }
+
+            if (EOWNERDEAD == lockResult) { 
+                // Is ignoring "blocking", but no way not to block here
+                // without risking huge inconsistencies.
+                robustLock(&hdr->mutex);
+                // This fixes broken condition variables, which sometimes
+                // occur, if the process died while waiting on a condition.
+                pthread_cond_init(roleCondPtr, &hdr->condAttr);
+                pthread_mutex_unlock(&hdr->mutex);
+            }
+
+            // take care of adjusting size
+
+            robustLock(&hdr->mutex);
+
+            // only resize if bigger then current size
+            if (size > hdr->size) {
+                if (0 > ftruncate(descriptor, size)) { 
                     throw std::runtime_error(
-                            std::string("MMap failed: ")
+                            std::string("Resizing shared memory segment \"")
+                            + std::string(name)
+                            + std::string("\" to ")
+                            + std::to_string(size)
+                            + std::string(" bytes failed: ")
                             + std::strerror(errno));
                 }
-                // get and initialize stub
-                stb = (stub*)mem;
-                *stb = {};
+                hdr->size = size;
+            } else if (size < hdr->size) {
+                openMemory();
+            }
 
-                // intialize shared and recursive mutex in stub 
-                pthread_mutexattr_init(&stb->mutexAttr);
-                pthread_mutexattr_settype(&stb->mutexAttr, PTHREAD_MUTEX_RECURSIVE);
-                pthread_mutexattr_setpshared(&stb->mutexAttr, PTHREAD_PROCESS_SHARED);
-                pthread_mutexattr_setrobust(&stb->mutexAttr, PTHREAD_MUTEX_ROBUST);
-                pthread_mutex_init(&stb->mutex, &stb->mutexAttr);
-                // intialize shared condition in stub
-                pthread_condattr_init(&stb->condAttr);
-                pthread_condattr_setpshared(&stb->condAttr, PTHREAD_PROCESS_SHARED);
-                pthread_cond_init(&stb->cond, &stb->condAttr);
+            pthread_mutex_unlock(&hdr->mutex);
+        }
 
-                mem += sizeof(stub);
-                std::memset(mem, 0, size);
+        ~segment () {
+
+            // unregister as reader/writer
+            pthread_mutex_unlock(roleMutexPtr);
+
+            munmap(hdr, size);
+            close(descriptor);
+        }
+
+        void openMemory () {
+
+            if (nullptr != hdr) {
+                if (hdr->size == size) { 
+                    return;
+                }
+
+                size_t newSize = hdr->size;
+
+                munmap(hdr, size);
+
+                size = newSize;
+                usableSize = size - sizeof(uint32_t) - sizeof(header);
+            }
+
+            void* ptr = mmap(
+                    0, 
+                    size,
+                    PROT_READ | PROT_WRITE, 
+                    MAP_SHARED, 
+                    descriptor,
+                    0);
+
+            if (MAP_FAILED == ptr) {
+                throw std::runtime_error(
+                        std::string("Opening shared memory failed: ")
+                        + std::strerror(errno));
+            }
+
+            hdr = (header*)ptr;
+            memory = ((uint8_t*)ptr) + sizeof(header);
+
+            if (reader) {
+                roleMutexPtr = &hdr->readerMutex;
+                roleCondPtr = &hdr->readerCond;
             } else {
-                // reusing already created segment
-                mem = (uint8_t*) mmap(0, actualSize,
-                        PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
-                if (MAP_FAILED == mem) {
-                    throw std::runtime_error(
-                            std::string("MMap failed: ")
-                            + std::strerror(errno));
-                }
-                stb = (stub*)mem;
-                mem += sizeof(stub);
+                roleMutexPtr = &hdr->writerMutex;
+                roleCondPtr = &hdr->writerCond;
             }
         }
 
-        ~seg () {
+        void destroy () {
 
-            munmap(mem - sizeof(stub), size);
-            close(fd);
+            // Prevents the shared memory segment to be opened 
+            // and marks the segment for deallocation once all
+            // processes have unmapped its associated memory.
+            // Already connected processes continue normally.
+            shm_unlink(name.c_str());
         }
 
-        uint8_t* push (size_t chunkSize, mode m = WAIT) { 
+        size_t length () {
+
+            return usableSize;
+        }
+
+        bool empty () {
+
+            ring_buffer rb = hdr->rb;
+            return 0 == rb.wrapped && rb.begin == rb.end;
+        }
+
+        int lock () {
+
+            return robustLock(&hdr->mutex, blocking);
+        }
+
+        void unlock () { 
+
+            if (roleCondPtr == &hdr->readerCond) { 
+                pthread_cond_signal(&hdr->writerCond);
+            } else { 
+                pthread_cond_signal(&hdr->readerCond);
+            }
+
+            pthread_mutex_unlock(&hdr->mutex);
+        }
+
+        uint8_t* push (size_t chunkSize) { 
+
+            openMemory();
 
             // sizeof(uint32_t) byte for chunk size prefix
             size_t actualChunkSize = sizeof(uint32_t) + chunkSize;
 
             // abort if trying to allocate 0 bytes
             // or if the chunkSize is bigger than the segment 
-            if (actualChunkSize > size || chunkSize == 0) {
+            if (actualChunkSize > usableSize || chunkSize == 0) {
                 return nullptr;
             }
 
+            // the bad and the ugly bit (we're missing the good one)
+        
+            ring_buffer rb = hdr->rb;
+            
             bool foundChunk = false;
 
             while (!foundChunk) {
-                // optimistic approach to life
-                foundChunk = true; 
 
-                if (stb->wrapped) {
-                    foundChunk = stb->begin - stb->end >= actualChunkSize;
-                } else if (stb->end + actualChunkSize > size) {
-                    // wrapping needed, check if enough space
-                    foundChunk = stb->begin >= actualChunkSize;
-                    // write wrapper marker
-                    *(mem + stb->end) = 0;
-                    stb->end = 0;
-                    stb->wrapped = true;
+                if (1 == rb.wrapped) {
+                    if (rb.begin - rb.end >= actualChunkSize) {
+                        foundChunk = true;
+                    }
+                } else if (rb.end + actualChunkSize > usableSize) {
+                    // wrapping needed, check if enough space at the beginning
+                    if (rb.begin >= actualChunkSize) {
+                        // ok enough space ...
+                        foundChunk = true;
+                        // ... write wrapping marker
+                        *(uint32_t*)(memory + rb.end) = 0;
+                        // .. and wrap
+                        rb.end = 0;
+                        rb.wrapped = 1;
+                    }
+                } else { 
+                    foundChunk = true;
                 }
 
                 if (!foundChunk) { 
-                    if (WAIT == m) {
-                        // wait until other thread/process removes chunk
-                        pthread_cond_wait(&stb->cond, &stb->mutex);
-                    } else {
-                        // or don't wait if NO_WAIT is set
+                    if (!blocking) {
                         return nullptr;
                     }
+                    
+                    // write back ring buffer state before waiting
+                    hdr->rb = rb;
+
+                    int resultWait = pthread_cond_wait(
+                            &hdr->writerCond, &hdr->mutex); 
+                    if (EOWNERDEAD == resultWait) {
+                        pthread_mutex_consistent(&hdr->mutex);
+                    }
+
+                    openMemory();
+
+                    // ring buffer state may have changed during wait 
+                    rb = hdr->rb;
                 }
             }
 
-            uint8_t* ptr = (uint8_t*)(mem + stb->end);
+            uint8_t* ptr = memory + rb.end;
 
             // write chunk size
             *(uint32_t*)ptr = chunkSize;
             ptr += sizeof(uint32_t);
 
-            stb->end += actualChunkSize;
-            stb->chunkCounter += 1;
+            // advance end 
+            rb.end += actualChunkSize;
+
+            // atomic write back of ring_buffer state
+            hdr->rb = rb;
 
             return ptr;
         }
 
-        void lock () {
+        uint8_t* pop (size_t& chunkSize) { 
 
-            if (PTHREAD_MUTEX_ROBUST == pthread_mutex_lock(&stb->mutex)) { 
-                pthread_mutex_consistent(&stb->mutex);
-                std::cout << "made consistent" << std::endl;
-            }
-        }
+            openMemory();
 
-        void unlock () {
-
-            pthread_mutex_unlock(&stb->mutex);
-            pthread_cond_signal(&stb->cond);
-        }
-
-        void pop (mode m = WAIT) { 
-
-            while (WAIT == m && stb->chunkCounter < 1) {
-                // wait until other thread/process adds a chunk
-                pthread_cond_wait(&stb->cond, &stb->mutex); 
-            }
-
-            uint32_t chunkSize = *(uint32_t*)(mem + stb->begin);
-
-            if (stb->wrapped && chunkSize == 0) {
-                // if end has already wrapped, and we are
-                // at the wrapping point (indicated by chunkSize of 0)
-                stb->begin = 0;
-                chunkSize = *(uint32_t*)(mem + stb->begin);
-                stb->wrapped = false;
-            } 
-
-            // if this was a non empty chunk deallocate it
-            if (chunkSize > 0) {
-                *(uint32_t*)(mem + stb->begin) = 0;
-                stb->begin += sizeof(uint32_t) + chunkSize;
-                stb->chunkCounter = std::max(stb->chunkCounter - 1, (size_t)0);
-            }
-        }
-
-        uint8_t* peek (mode m = WAIT) {
-
-            while (stb->chunkCounter < 1) {
-                if (NO_WAIT == m) {
+            while (empty()) {
+                if (!blocking) {
                     return nullptr;
                 }
-                pthread_cond_wait(&stb->cond, &stb->mutex); 
+                // wait until other thread/process adds a chunk
+                int resultWait = pthread_cond_wait(
+                        &hdr->readerCond, &hdr->mutex); 
+                if (EOWNERDEAD == resultWait) {
+                    pthread_mutex_consistent(&hdr->mutex);
+                }
+
+                openMemory();
             }
 
-            size_t readPosition = stb->begin;
-            uint32_t chunkSize = *(uint32_t*)(mem + readPosition);
+            ring_buffer rb = hdr->rb;
 
-            if (stb->wrapped && chunkSize == 0) {
-                readPosition = 0;
+            chunkSize = *(uint32_t*)(memory + rb.begin);
+
+            if (1 == rb.wrapped && 0 == chunkSize) {
+                // chunkSize == 0 means we are at the wrapping marker
+                rb.begin = 0;
+                chunkSize = *(uint32_t*)(memory + rb.begin);
+                rb.wrapped = 0;
             } 
 
-            return (uint8_t*)(mem + readPosition);
+            uint8_t* ptr = memory + rb.begin + sizeof(uint32_t);
+            rb.begin += sizeof(uint32_t) + chunkSize;
+
+            // atomic write back of ring buffer state
+            hdr->rb = rb;
+
+            return ptr;
         }
     };
 
-    class send {
+    /*
+     * Convenience types for read or write access to shared memory.
+     */
 
+    struct reader : segment {
+        reader (const char* name, const size_t size, bool blocking = true)
+            : segment(name, size, true, blocking) { }
+    };
+
+    struct writer : segment {
+        writer (const char* name, const size_t size, bool blocking = true)
+            : segment(name, size, false, blocking) { }
+
+        ~ writer () {
+            destroy();
+        }
+    };
+
+    /*
+     * Message definition as a list of (name, size) pairs.
+     */
+    typedef std::vector<std::pair<std::string, uint32_t>> definition;
+
+    /*
+     * The message type is used to conveniently operate on segments.
+     */
+    class message {
+
+        // stores the offset from the beginning of the message
+        // memory chunk for the corresponding field name
         std::unordered_map<std::string, size_t> dataOffsets;
 
+        // reference to the shared memory segment
+        segment& seg;
+
+        // used in non-blocking mode to check
+        // if the message actually contains something
         bool isOk = true;
 
+        // points to the (shared) memory chunk of the message
         uint8_t* basePtr = nullptr;
 
-        seg& segment;
+        // size used by message in shared memory
+        size_t size = 0;
 
     public:
 
-        send (seg& segment, def d, mode m = WAIT) : segment{segment} { 
+        message (reader& rdr) : seg{rdr} { 
 
-            uint32_t msgSize = 0;
+            // try to acquire segment-wide lock
 
-            for (std::pair<std::string, uint32_t>& entry : d) {
-                // name size
-                msgSize += sizeof(uint8_t);
-                // name 
-                msgSize += std::get<0>(entry).length();
-                // data size
-                msgSize += sizeof(uint32_t);
-                // data
-                msgSize += std::get<1>(entry);
-            }
-
-            // find fitting chunk in shared memory 
-            
-            segment.lock();
-
-            basePtr = segment.push(msgSize, m);
-            uint8_t* ptr = basePtr;
-
-            if (nullptr == ptr) {
+            if (EBUSY == seg.lock()) {
+                // in non-blocking mode
                 isOk = false;
                 return;
             }
 
-            // initialize frame to hold data
+            // try to pop chunk, may block until chunk available
 
-            for (std::pair<std::string, uint32_t>& entry : d) {
-
-                std::string& entryName = std::get<0>(entry);
-                uint8_t entryNameLen = entryName.length();
-                uint32_t entryDataLen = std::get<1>(entry);
-
-                // write name size
-                *(uint8_t*)ptr = entryNameLen;
-                ptr += sizeof(uint8_t);
-
-                // write name
-                memcpy(ptr, entryName.c_str(), entryNameLen);
-                ptr += entryNameLen;
-
-                // write data size 
-                *(uint32_t*)ptr = entryDataLen;
-                ptr += sizeof(uint32_t);
-
-                // store offset to buffer start
-                dataOffsets[entryName] = ptr - basePtr;
-                ptr += entryDataLen;
-            }
-        }
-
-        ~send () {
-
-            segment.unlock();
-        }
-
-        template<typename T>
-        T& at(std::string entryName) {
-
-            return (T&) *(basePtr + dataOffsets.at(entryName));
-        }
-
-        bool ok () {
-
-            return isOk;
-        }
-    };
-
-    class recv { 
-
-        std::unordered_map<std::string, size_t> dataOffsets;
-
-        bool isOk = true;
-
-        mode m = WAIT;
-
-        seg& segment;
-
-        uint8_t* basePtr;
-
-    public:
-
-        recv (seg& segment, mode m = WAIT) : segment{segment} {
-
-            segment.lock();
-
-            basePtr = segment.peek(m);
-            uint8_t* ptr = basePtr;
-
-            if (nullptr == ptr) {
+            size = 0;
+            basePtr = seg.pop(size);
+            if (nullptr == basePtr) {
+                // in non-blocking mode
                 isOk = false;
                 return;
             }
 
-            uint32_t msgSize = *(uint32_t*)ptr;
-            ptr += sizeof(uint32_t);
+            uint8_t* ptr = basePtr;
 
-            while (ptr - basePtr < msgSize + sizeof(uint32_t)) { 
+            while (ptr - basePtr < size + sizeof(uint32_t)) { 
 
                 // read name size
                 uint8_t entryNameLen = *ptr;
@@ -375,74 +521,86 @@ namespace shq {
                 ptr += entryDataLen;
             }
         }
+        
+        message (writer& wtr, definition def) : seg{wtr} {
 
-        template<typename T>
-        T& at(std::string entryName) {
+            // first calculate message size from message definition
 
-            return (T&) *(basePtr + dataOffsets.at(entryName));
+            for (std::pair<std::string, uint32_t>& entry : def) {
+                // name size
+                size += sizeof(uint8_t);
+                // name 
+                size += std::get<0>(entry).length();
+                // data size
+                size += sizeof(uint32_t);
+                // data
+                size += std::get<1>(entry);
+            }
+
+            // try to acquire segment-wide lock
+
+            if (EBUSY == seg.lock()) {
+                // in non-blocking mode
+                isOk = false;
+                return;
+            }
+
+            // try to allocate chunk, may block until memory available
+
+            basePtr = seg.push(size);
+            if (nullptr == basePtr) {
+                // in non-blocking mode or message too large
+                isOk = false;
+                return;
+            }
+
+            uint8_t* ptr = basePtr;
+
+            // initialize frame in chunk to hold data
+
+            for (std::pair<std::string, uint32_t>& entry : def) {
+
+                std::string& entryName = std::get<0>(entry);
+                uint8_t entryNameLen = entryName.length();
+                uint32_t entryDataLen = std::get<1>(entry);
+
+                // write name size
+                *(uint8_t*)ptr = entryNameLen;
+                ptr += sizeof(uint8_t);
+
+                // write entry name
+                memcpy(ptr, entryName.c_str(), entryNameLen);
+                ptr += entryNameLen;
+
+                // write data size 
+                *(uint32_t*)ptr = entryDataLen;
+                ptr += sizeof(uint32_t);
+
+                // store offset to buffer start
+                dataOffsets[entryName] = ptr - basePtr;
+                ptr += entryDataLen;
+            }
         }
 
-        ~recv () {
-            
-            segment.pop(m);
-            segment.unlock();
+        ~message () {
+
+            seg.unlock();
         }
 
         bool ok () {
 
             return isOk;
         }
-    };
-}
 
-/*
- * Defines the << operator for shq::seg.
- * For "better" printf debugging ...
- */
-std::ostream& operator<<(std::ostream& os, shq::seg& s) {
+        template<typename T>
+        T& at (std::string entryName) {
 
-   // pthread_mutex_lock(&s.stb->mutex);
-
-    os << "Segment state:" << std::endl;
-    os << "    Begin: " << s.stb->begin << std::endl;
-    os << "    End: " << s.stb->end << std::endl;
-    os << "    Wrapped: " << s.stb->wrapped << std::endl;
-
-    uint8_t* ptr = s.mem + s.stb->begin;
-    bool wrapped = s.stb->wrapped;
-
-    std::vector<size_t> chunkSizes;
-
-    while (wrapped || ptr != (s.mem + s.stb->end)) {
-        uint32_t chunkSize = *(uint32_t*)(ptr);
-        if (s.stb->wrapped && 0 == chunkSize) {
-            ptr = s.mem;
-            wrapped = false;
-        } else {
-            chunkSizes.push_back(chunkSize);
-            ptr += sizeof(uint32_t) + chunkSize;
+            return (T&) *(basePtr + dataOffsets.at(entryName));
         }
-    }
 
-    os << "Found "
-       << chunkSizes.size()
-       << (chunkSizes.size() == 1 ? " chunk:" : " chunks:")
-       << std::endl;
+        bool has (std::string entryName) { 
 
-    size_t memoryUsage = 0;
-
-    for (int i = 0; i < chunkSizes.size(); ++i) { 
-        os << "    Chunk "
-           << i << ": " << chunkSizes[i]
-           << " bytes" << std::endl;
-        memoryUsage += sizeof(uint32_t) + chunkSizes[i];
-    }
-
-    os << "Used " 
-       << memoryUsage << "/" << s.size
-       << " bytes";
-
-    //pthread_mutex_unlock(&s.stb->mutex);
-
-    return os;
+            return 1 == dataOffsets.count(entryName);
+        }
+    };
 }

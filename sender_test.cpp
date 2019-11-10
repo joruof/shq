@@ -1,27 +1,20 @@
 #include <iostream> 
-#include "shq_new.h"
-
-#include <atomic>
+#include "shq.h"
 
 int main (int argc, char** argv) {
 
-    shm_unlink("cond_lock_test");
+    shm_unlink("shq_counter_demo");
+
+    shq::writer writer("shq_counter_demo", 240);
 
     shq::definition def = {
-            {"a", sizeof(float)},
-            {"b", sizeof(uint8_t)}
+            {"i", sizeof(int)},
+            {"time", sizeof(int)}
         };
 
-    shq::writer writer("cond_lock_test", 128);
-
-    int i = 0;
-
-    while (true) { 
-
-        //usleep(100000);
+    for (int i = 0; i < 1000; i++) { 
 
         shq::message msg(writer, def);
-        msg.at<float>("a") = i++;
-        msg.at<uint8_t>("b") = 'a';
+        msg.at<int>("i") = i;
     }
 }
