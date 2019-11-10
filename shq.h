@@ -213,7 +213,7 @@ namespace shq {
 
             robustLock(&hdr->mutex);
 
-            // only resize if bigger then current size
+            // only resize if bigger than current size
             if (size > hdr->size) {
                 if (0 > ftruncate(descriptor, size)) { 
                     throw std::runtime_error(
@@ -438,14 +438,21 @@ namespace shq {
      */
 
     struct reader : segment {
-        reader (const char* name, const size_t size, bool blocking = true)
-            : segment(name, size, true, blocking) { }
+        reader (const char* name, bool blocking = true)
+            : segment(name, 0, true, blocking) { }
     };
 
     struct writer : segment {
-        writer (const char* name, const size_t size, bool blocking = true)
-            : segment(name, size, false, blocking) { }
 
+        writer (const char* name,
+                const size_t maxMsgSize,
+                const size_t queueSize,
+                bool blocking = true)
+            : segment(name, 
+                    (maxMsgSize + sizeof(uint32_t)) * queueSize,
+                    false,
+                    blocking) {
+            }
         ~ writer () {
             destroy();
         }

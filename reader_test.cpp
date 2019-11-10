@@ -3,11 +3,13 @@
 
 int main(int argc, char** argv) {
 
-    shq::reader reader("shq_counter_demo", 230);
+    shq::reader reader("shq_counter_demo");
 
     for (int i = 0; i < 100; i++) { 
 
         shq::message msg(reader);
-        std::cout << msg.has("time") << std::endl;
+        if (msg.has("i")) { 
+            std::cout << msg.at<int>("i") << std::endl;
+        }
     }
 }

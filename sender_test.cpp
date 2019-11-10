@@ -3,9 +3,7 @@
 
 int main (int argc, char** argv) {
 
-    shm_unlink("shq_counter_demo");
-
-    shq::writer writer("shq_counter_demo", 240);
+    shq::writer writer("shq_counter_demo", 100, 10);
 
     shq::definition def = {
             {"i", sizeof(int)},
@@ -13,7 +11,6 @@ int main (int argc, char** argv) {
         };
 
     for (int i = 0; i < 1000; i++) { 
-
         shq::message msg(writer, def);
         msg.at<int>("i") = i;
     }
