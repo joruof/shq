@@ -35,7 +35,7 @@ namespace shq {
     }
 
     /*
-     * This contains the state of the ring buffer
+     * This contains the state of the message ring buffer
      * in 64 bit, which allows atomic access.
      *
      * This means that the largest usable size of a
@@ -120,6 +120,18 @@ namespace shq {
 
     public:
 
+        /*
+         * name:       The name of the shared memory segment.
+         * usableSize: The size of the shared memory that can be
+         *             used to store user data. If there already
+         *             is a segment with the same name but with smaller
+         *             usableSize the existing segment will be expanded.
+         *             If the usableSize is bigger, the existing segment
+         *             will NOT be truncated.
+         * reader:     Whether this segment should be used in read mode.
+         * blocking:   Whether operations may block or rather return
+         *             immediately with error.
+         */
         segment (const char* name, 
                  const size_t usableSize, 
                  bool reader = true, 
@@ -453,7 +465,7 @@ namespace shq {
                     false,
                     blocking) {
             }
-        ~ writer () {
+        ~writer () {
             destroy();
         }
     };

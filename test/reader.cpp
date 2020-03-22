@@ -9,7 +9,7 @@ int main(int argc, char** argv) {
 
         shq::message msg(reader);
         if (msg.has("i")) { 
-            std::cout << msg.at<int>("i") << std::endl;
+            std::cout << "[READER] " << msg.at<int>("i") << std::endl;
         }
     }
 }

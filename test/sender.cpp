@@ -13,5 +13,6 @@ int main (int argc, char** argv) {
     for (int i = 0; i < 1000; i++) { 
         shq::message msg(writer, def);
         msg.at<int>("i") = i;
+        std::cout << "[WRITER] " << i << std::endl;
     }
 }
