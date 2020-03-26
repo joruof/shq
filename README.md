@@ -1,6 +1,6 @@
 # SHQ (SHared Queue)
 
-A robust, single-header, N-to-N, message queue via shared memory for GNU/linux .
+A robust, single-header, N-to-N, message queue via shared memory for GNU/Linux.
 
 # Guarantees
 
