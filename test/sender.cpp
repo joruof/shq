@@ -16,14 +16,17 @@ int main (int, char**) {
 
     for (int i = 1; i < 100000000; i++) { 
 
-        {
-            usleep(5000);
+        usleep(500000);
+
+        if (i % 2 == 0) {
+            shq::message msg(writer, def);
+            msg.at<int>("i") = i;
+            std::cout << "[WRITER] " << *msg.chuk.seq << std::endl;
+        } else {
             shq::message msg(writer, def_timed);
             msg.at<int>("i") = i;
-
-            //writer.printChunks();
-
-            std::cout << "[WRITER] " << msg.chuk.seq << std::endl;
+            msg.at<int>("time") = 0;
+            std::cout << "[WRITER] " << *msg.chuk.seq << std::endl;
         }
     }
 }

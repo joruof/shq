@@ -1,49 +1,81 @@
-#include <errno.h>
 #include <fcntl.h>
 #include <unistd.h>
-#include <string.h>
-#include <pthread.h>
 #include <sys/mman.h>
-#include <sys/stat.h>
 #include <linux/futex.h>
 #include <sys/syscall.h>
 
-#include <tuple>
 #include <vector>
 #include <atomic>
 #include <cstring>
 #include <iostream>
 #include <unordered_map>
 
-#include <chrono>
-
-long int getTime() {
-
-    auto t = std::chrono::high_resolution_clock::now();
-    return t.time_since_epoch().count();
-}
-
 namespace shq {
 
     /*
-     * Helper method, locks mutex and fixes state, if previous owner died.
+     * Simple object wrapper around the file lock concept.
+     *
+     * We use file locks excessively, as they allow read/write
+     * locks and are cleaned up when the owning process dies. 
      */
-    int robustLock (pthread_mutex_t* mutex, bool blocking = true) {
+    struct file_lock {
+        
+        const int descriptor;
+        const int offset;
+        const size_t len;
+        const int type;
 
-        int lockResult;
-
-        if (blocking) { 
-            lockResult = pthread_mutex_lock(mutex);
-        } else { 
-            lockResult = pthread_mutex_trylock(mutex);
+        file_lock (int descriptor, int offset, size_t len, int type) :
+            descriptor{descriptor}, offset{offset}, len{len}, type{type} {
         }
 
-        if (EOWNERDEAD == lockResult) {
-            pthread_mutex_consistent(mutex);
+        flock buildFlock() {
+
+            flock lock;
+
+            lock.l_whence = SEEK_SET;
+            lock.l_start = offset;
+            lock.l_len = len;
+
+            return lock;
         }
 
-        return lockResult;
-    }
+        int lock () { 
+
+            flock lock = buildFlock();
+            lock.l_type = type;
+
+            if (-1 == fcntl(descriptor, F_SETLKW, &lock)) {
+                return errno;
+            }
+
+            return 0;
+        }
+
+        int unlock () {
+
+            flock lock = buildFlock();
+            lock.l_type = F_UNLCK;
+
+            if (-1 == fcntl(descriptor, F_SETLK, &lock)) {
+                return errno;
+            }
+
+            return 0;
+        }
+
+        bool check () {
+
+            flock lock = buildFlock();
+            lock.l_type = type;
+
+            if (-1 == fcntl(descriptor, F_GETLK, &lock)) {
+                return false;
+            }
+
+            return lock.l_type == F_UNLCK;
+        }
+    };
 
     /*
      * Sadly, pthread condition variables do not behave like needed.
@@ -52,23 +84,26 @@ namespace shq {
      * And: https://sourceware.org/bugzilla/show_bug.cgi?id=21422
      *
      * This is a lightweight condition variable replacement
-     * using Linux futexes. Not very polished though and probably
-     * prone to the "thundering herd" effect.
+     * using Linux futexes and file locks. Not very polished
+     * and probably prone to the "thundering herd" effect,
+     * meaning that the cache will be competely trashed, when
+     * a lot of processes wake up at once and all want to lock
+     * the same file_lock.
      */
     struct futex_cond_var {
 
         std::atomic_int value{0};
         std::atomic_uint previous{0};
 
-        int wait (pthread_mutex_t* mtx) {
+        int wait (file_lock& fl) {
 
             int val = value;
             previous = val;
 
-            pthread_mutex_unlock(mtx);
+            fl.unlock();
             int res = syscall(SYS_futex,
                     &value, FUTEX_WAIT, val, NULL, NULL, 0);
-            robustLock(mtx);
+            fl.lock();
 
             return res;
         }
@@ -89,7 +124,7 @@ namespace shq {
      * that even if the process is interrupted by e.g. SIGINT
      * the buffer state is still guaranteed to be consistent.
      *
-     * However, this also means that the largest usable size
+     * However, this also means that the largest addressable size
      * of a single shared memory segment is limited to ~2.1 GB.
      */ 
     struct ring_buffer { 
@@ -103,17 +138,27 @@ namespace shq {
             wrapped : 2;
     };
 
+    /*
+     * A chunk is one allocated unit (i.e. a message) in
+     * the shared memory segment.
+     */
     struct chunk {
 
+        static size_t headerSize;
+
         // payload size of the chunk in bytes
-        uint32_t size;
+        uint32_t* size;
 
         // sequence number of the chunk
-        uint64_t seq;
+        uint64_t* seq;
 
         // pointer to the payload data of the chunk
         uint8_t* data;
     };
+
+    // sizeof(uint32_t) for chunk size prefix
+    // sizeof(uint64_t) for the sequence number prefix
+    size_t chunk::headerSize = sizeof(uint32_t) + sizeof(uint64_t);
 
     /*
      * Header contains necessary synchronization data.
@@ -126,12 +171,6 @@ namespace shq {
 
         // the next sequence number to be used
         uint64_t nextSeq;
-
-        // used to init robust and shared mutexes
-        pthread_mutexattr_t mutexAttr;
-
-        // locked on allocation/deallocation
-        pthread_mutex_t mutex;
 
         // contains the state of the ring buffer
         std::atomic<ring_buffer> rb;
@@ -149,21 +188,22 @@ namespace shq {
         size_t size;
 
         // actual usable size of the shared memory segment
+        // meaning: size - sizeof(header)
         size_t usableSize;
 
-        // name of the shared memory segment
-        std::string name;
-
-        // pointer into the shared memory
+        // pointer into the shared memory after the header
         uint8_t* memory;
 
         // temporary ring buffer
         ring_buffer rb;
 
-    public:
-
         // header used for synchronization
         header* hdr;
+
+    public:
+
+        // name of the shared memory segment
+        const std::string name;
 
         // whether to wait for locks or return with error instead
         const bool blocking;
@@ -190,9 +230,9 @@ namespace shq {
             : descriptor{shm_open(name, O_RDWR, 0666)},
               size{sizeof(header) + usableSize + sizeof(uint32_t)},
               usableSize{usableSize},
-              name{name},
               memory{nullptr},
               hdr{nullptr},
+              name{name},
               blocking{blocking},
               reader{reader} {
 
@@ -222,6 +262,8 @@ namespace shq {
                             + std::strerror(errno));
                 }
 
+                lockHeader(F_WRLCK);
+
                 openMemory();
 
                 // initialize header
@@ -234,19 +276,11 @@ namespace shq {
                 rb.end = 0;
                 rb.wrapped = 0;
                 hdr->rb = rb;
-                
-                pthread_mutexattr_init(&hdr->mutexAttr);
-                pthread_mutexattr_setpshared(
-                        &hdr->mutexAttr, PTHREAD_PROCESS_SHARED);
-                pthread_mutexattr_setrobust(
-                        &hdr->mutexAttr, PTHREAD_MUTEX_ROBUST);
-
-                pthread_mutex_init(&hdr->mutex, &hdr->mutexAttr);
             }
 
             // take care of adjusting size
             
-            robustLock(&hdr->mutex);
+            lockHeader(F_WRLCK);
 
             // only resize if bigger than current size
             if (size > hdr->size) {
@@ -264,7 +298,7 @@ namespace shq {
                 openMemory();
             }
 
-            pthread_mutex_unlock(&hdr->mutex);
+            unlockHeader();
         }
 
         ~segment () {
@@ -326,133 +360,45 @@ namespace shq {
             return 0 == rb.wrapped && rb.begin == rb.end;
         }
 
-        int lockHeader () {
+        int lockHeader (int type) {
 
-            return robustLock(&hdr->mutex, blocking);
+            file_lock headerLock(descriptor, 0, 1, type);
+            return headerLock.lock();
         }
 
-        void unlockHeader () { 
+        int unlockHeader () { 
 
-            pthread_mutex_unlock(&hdr->mutex);
+            file_lock headerLock(descriptor, 0, 1, 0);
+            return headerLock.unlock();
         }
 
-        void signalPush () {
+        int clearLock (chunk c) {
 
+            file_lock l(descriptor, c.data - (uint8_t*)hdr, *c.size, F_RDLCK);
+            return l.unlock();
+        }
+
+        void commit () {
+
+            hdr->rb = rb;
             hdr->readerCondVar.signal();
         }
 
-        void waitPush () {
+        bool alloc (size_t chunkSize, chunk& result) { 
 
-            hdr->readerCondVar.wait(&hdr->mutex);
-        }
-
-        void commitTemporaryRingBuffer () {
-
-            hdr->rb = rb;
-        }
-
-        int setWriteLock (uint8_t* addr, size_t len) {
-
-            flock lock;
-
-            lock.l_type = F_WRLCK;
-            lock.l_whence = SEEK_SET;
-            lock.l_start = addr - memory;
-            lock.l_len = len;
-
-            if (-1 == fcntl(descriptor, F_SETLKW, &lock)) {
-                std::cout << "Lock failed: " << std::strerror(errno) << std::endl;
-                return errno;
-            }
-
-            return 0;
-        }
-
-        int checkWriteLock (uint8_t* addr, size_t len) {
-
-            flock lock;
-
-            lock.l_type = F_WRLCK;
-            lock.l_whence = SEEK_SET;
-            lock.l_start = addr - memory;
-            lock.l_len = len;
-
-            if (-1 == fcntl(descriptor, F_GETLK, &lock)) {
-                std::cout << "Lock failed: " << std::strerror(errno) << std::endl;
-                return errno;
-            }
-
-            return lock.l_type == F_UNLCK ? 1 : 0;
-        }
-
-        int checkReadLock (uint8_t* addr, size_t len) {
-
-            flock lock;
-
-            lock.l_type = F_RDLCK;
-            lock.l_whence = SEEK_SET;
-            lock.l_start = addr - memory;
-            lock.l_len = len;
-
-            if (-1 == fcntl(descriptor, F_GETLK, &lock)) {
-                std::cout << "Lock failed: " << std::strerror(errno) << std::endl;
-                return errno;
-            }
-
-            return lock.l_type == F_UNLCK ? 1 : 0;
-        }
-
-        int setReadLock (chunk c) {
-
-            flock lock;
-
-            lock.l_type = F_RDLCK;
-            lock.l_whence = SEEK_SET;
-            lock.l_start = c.data - memory;
-            lock.l_len = c.size;
-
-            if (-1 == fcntl(descriptor, F_SETLKW, &lock)) {
-                std::cout << "Lock failed: " << std::strerror(errno) << std::endl;
-                return errno;
-            }
-
-            return 0;
-        }
-
-        int clearLock (uint8_t* addr, size_t len) {
-
-            flock lock;
-
-            lock.l_type = F_UNLCK;
-            lock.l_whence = SEEK_SET;
-            lock.l_start = addr - memory;
-            lock.l_len = len;
-
-            if (-1 == fcntl(descriptor, F_SETLK, &lock)) {
-                std::cout << "Unlock failed: " << std::strerror(errno) << std::endl;
-                return errno;
-            }
-
-            return 0;
-        }
-
-        uint8_t* push (size_t chunkSize) { 
-
-            lockHeader();
+            lockHeader(F_WRLCK);
 
             openMemory();
 
-            // sizeof(uint32_t) byte for chunk size prefix
-            // sizeof(uint64_t) byte for the sequence number prefix
-            size_t actualChunkSize =  sizeof(uint32_t) + sizeof(uint64_t) + chunkSize;
+            size_t actualChunkSize = chunk::headerSize + chunkSize;
 
             // abort if trying to allocate 0 bytes
             // or if the chunkSize is bigger than the segment 
             if (actualChunkSize > usableSize || chunkSize == 0) {
-                return nullptr;
+                return false;
             }
 
-            // the bad and the ugly bit (we're missing the good one)
+            // start of the bad and ugly bit (we're missing the good one)
             
             ring_buffer rb_start = hdr->rb;
             rb = rb_start;
@@ -483,26 +429,38 @@ namespace shq {
                 }
 
                 if (foundChunk) {
-                    // ok it seems like we found a viable chunk
+                    // ok, it seems like we found a viable chunk
                 
                     ptr = memory + rb.end;
 
-                    // try to acquire write lock, may block
-                    
-                    setWriteLock(ptr + sizeof(uint32_t) + sizeof(uint64_t), chunkSize);
+                    // convert header write lock to read lock
+                    // so that readers may already proceed
+                    lockHeader(F_RDLCK);
+
+                    // try to acquire chunk write lock,
+                    // may wait for unfinished readers
+                    file_lock writeLock(
+                            descriptor, 
+                            ptr + chunk::headerSize - (uint8_t*)hdr,
+                            chunkSize, 
+                            F_WRLCK);
+                    writeLock.lock();
 
                     ring_buffer rb_now = hdr->rb;
 
                     if (rb_start.end != rb_now.end) {
-
                         // The ring buffer state has changed.
                         // This means another writer has already written this
-                        // chunk, while we were waiting in setWriteLock above.
+                        // chunk, while we were waiting in writeLock.lock().
                         // Therefore, we release the lock and try again.
                         foundChunk = false;
-                        rb_start = rb_now;
+                        rb_start = hdr->rb;
                         rb = rb_start;
-                        clearLock(ptr + sizeof(uint32_t) + sizeof(uint64_t), chunkSize);
+                        writeLock.unlock();
+
+                        // also convert read lock to write lock,
+                        // as we may need to modify the buffer state again
+                        lockHeader(F_WRLCK);
                     } 
                 } else {
                     // no free chunk found, pop the oldest chunk
@@ -516,9 +474,9 @@ namespace shq {
                         rb.wrapped = 0;
                     } 
 
-                    rb.begin += sizeof(uint32_t) + sizeof(uint64_t) + popChunkSize;
+                    rb.begin += chunk::headerSize + popChunkSize;
 
-                    // to remove now to be written segment from the ring buffer
+                    // removes now to be written chunk from the ring buffer
 
                     ring_buffer writeBack = rb;
                     writeBack.end = rb_start.end;
@@ -527,19 +485,78 @@ namespace shq {
             }
 
             // write chunk size
-            *(uint32_t*)ptr = (uint32_t)chunkSize;
+            result.size = (uint32_t*)ptr;
+            *result.size = chunkSize;
             ptr += sizeof(uint32_t);
 
             // write sequence number
-            *(uint64_t*)ptr = hdr->nextSeq++;
+            result.seq = (uint64_t*)ptr;
+            *result.seq = hdr->nextSeq++;
             ptr += sizeof(uint64_t);
+
+            // write pointer to payload data
+            result.data = ptr;
 
             // advance end in temporary ring buffer
             rb.end += (int)actualChunkSize;
+            
+            unlockHeader();
+
+            // Until now the new message allocation only happend
+            // in a temporary ring buffer. This ring buffer
+            // still has to be commited, so the chunk becomes
+            // visible to the readers. So if the process dies
+            // before committing, the memory segment is still
+            // remains in a valid state, only the chunk is lost.
+            // Committing happens in the destructor of "message".
+
+            return true;
+        }
+
+        bool get (uint64_t prevSeq, chunk& result) {
+
+            // try to acquire segment-wide lock
+            
+            lockHeader(F_RDLCK);
+
+            // try to find unread chunk
+            // may block until chunk available
+        
+            bool foundChunk = false;
+            
+            while(!foundChunk) {
+                for (chunk& c : chunks()) {
+                    if (*c.seq > prevSeq) {
+                        result = c;
+                        foundChunk = true;
+                        break;
+                    }
+                }
+                if (!foundChunk) {
+                    if (!blocking) {
+                        return false;
+                    }
+                    // did not find any new chunk -> sleep
+                    file_lock headerLock(descriptor, 0, 1, F_RDLCK);
+                    hdr->readerCondVar.wait(headerLock);
+                }
+            }
+
+            file_lock readLock(
+                    descriptor,
+                    result.data - (uint8_t*)hdr, 
+                    *result.size,
+                    F_RDLCK);
+
+            if (-1 == readLock.lock()) {
+                return false;
+            }
+
+            // at this point the chunk is protected from overwrite
 
             unlockHeader();
 
-            return ptr;
+            return true;
         }
 
         std::vector<chunk> chunks () {
@@ -569,10 +586,10 @@ namespace shq {
                 cs.emplace_back();
                 chunk& c = cs.back();
 
-                c.size = chunkSize;
+                c.size = (uint32_t*)ptr;
                 ptr += sizeof(uint32_t);
 
-                c.seq = *(uint64_t*)ptr;
+                c.seq = (uint64_t*)ptr;
                 ptr += sizeof(uint64_t);
 
                 c.data = ptr;
@@ -586,7 +603,7 @@ namespace shq {
 
         void printChunks () {
 
-            lockHeader();
+            lockHeader(F_RDLCK);
 
             std::vector<chunk> cs = chunks();
             const ring_buffer rb = hdr->rb;
@@ -599,8 +616,8 @@ namespace shq {
 
             for (chunk& c : cs) {
                 std::cout << "    seq: " << c.seq
-                          << ", size: " << c.size + sizeof(uint32_t) + sizeof(uint64_t)
-                         << ", offset: " << c.data - memory - sizeof(uint32_t) - sizeof(uint64_t)
+                          << ", size: " << c.size + chunk::headerSize
+                          << ", offset: " << c.data - memory - chunk::headerSize
                           << std::endl;
             }
 
@@ -628,8 +645,6 @@ namespace shq {
                     false,
                     blocking) {
             }
-        ~writer () {
-        }
     };
 
     /*
@@ -656,76 +671,22 @@ namespace shq {
         // if the message actually contains something
         bool isOk = true;
 
-        // points to the (shared) memory chunk of the message
-        uint8_t* basePtr = nullptr;
-
-        // size used by message in shared memory
-        size_t size = 0;
-
     public:
 
-        // the chunk that was referred to;
         chunk chuk;
 
         message (reader& rdr) : seg{rdr} { 
 
-            // try to acquire segment-wide lock
-            
-            seg.lockHeader();
-
-            // try to find unread chunk
-            // may block until chunk available
-        
-            bool foundChunk = false;
-            
-            while(!foundChunk) {
-                for (chunk& c : seg.chunks()) {
-                    if (c.seq > readerPrevSeq) {
-                        chuk = c;
-                        foundChunk = true;
-                        break;
-                    }
-                }
-                if (!foundChunk) {
-                    if (!seg.blocking) {
-                        isOk = false;
-                        return;
-                    }
-                    seg.waitPush();
-                }
-            }
-
-            // TODO: this can actually be a major performance
-            // issue because everyone (writers AND readers)
-            // has to wait for a blocking writer to finish
-            // before the read lock can be set.
-            // Maybe the issue can be mitigated a bit, if not
-            // a mutex but fcntl is use to guard the header.
-            // That way at least all readers can still operate.
-            
-            std::cout << "trying to read " << chuk.seq << std::endl;
-            
-            std::cout << "before read lock" << std::endl;
-            
-            if (-1 == seg.setReadLock(chuk)) {
+            if (!seg.get(readerPrevSeq, chuk)) {
                 isOk = false;
                 return;
             }
 
-            std::cout << "after read lock" << std::endl;
+            readerPrevSeq = *chuk.seq;
 
-            seg.unlockHeader();
+            uint8_t* ptr = chuk.data;
 
-            // at this point the chunk is protected from overwrite
-            // but writers can still write to other chunks
-
-            size = chuk.size;
-            readerPrevSeq = chuk.seq;
-            basePtr = chuk.data;
-
-            uint8_t* ptr = basePtr;
-
-            while (ptr - basePtr < (long int)size) { 
+            while (ptr - chuk.data < (long int)*chuk.size) { 
 
                 // read name size
                 uint8_t entryNameLen = *ptr;
@@ -740,7 +701,7 @@ namespace shq {
                 ptr += sizeof(uint32_t);
 
                 // read data offset relative to buffer start
-                dataOffsets[entryName] = ptr - basePtr;
+                dataOffsets[entryName] = ptr - chuk.data;
                 ptr += entryDataLen;
             }
         }
@@ -748,6 +709,8 @@ namespace shq {
         message (writer& wtr, definition def) : seg{wtr} {
 
             // first calculate message size from message definition
+            
+            size_t size = 0;
 
             for (std::pair<std::string, uint32_t>& entry : def) {
                 // name size
@@ -762,17 +725,13 @@ namespace shq {
 
             // try to allocate chunk, may block until memory available
     
-            basePtr = seg.push(size);
-
-            if (nullptr == basePtr) {
+            if (!seg.alloc(size, chuk)) {
                 // in non-blocking mode or message too large
                 isOk = false;
                 return;
             }
 
-            chuk.seq = seg.hdr->nextSeq - 1;
-
-            uint8_t* ptr = basePtr;
+            uint8_t* ptr = chuk.data;
 
             // initialize frame in chunk to hold data
 
@@ -795,7 +754,7 @@ namespace shq {
                 ptr += sizeof(uint32_t);
 
                 // store offset to buffer start
-                dataOffsets[entryName] = ptr - basePtr;
+                dataOffsets[entryName] = ptr - chuk.data;
                 ptr += entryDataLen;
             }
         }
@@ -803,17 +762,26 @@ namespace shq {
         ~message () {
 
             if (!seg.reader) {
-                seg.commitTemporaryRingBuffer();
-                seg.signalPush();
-                seg.clearLock(basePtr, size);
+                seg.commit();
             }
 
-            seg.clearLock(basePtr, size);
+            seg.clearLock(chuk);
         }
 
         bool ok () {
 
             return isOk;
+        }
+
+        template<typename T>
+        T& at (std::string entryName) {
+
+            return (T&) *(chuk.data + dataOffsets.at(entryName));
+        }
+
+        bool has (std::string entryName) { 
+
+            return 1 == dataOffsets.count(entryName);
         }
 
         std::vector<std::string> keys () {
@@ -824,18 +792,8 @@ namespace shq {
             }
             return ks;
         }
-
-        template<typename T>
-        T& at (std::string entryName) {
-
-            return (T&) *(basePtr + dataOffsets.at(entryName));
-        }
-
-        bool has (std::string entryName) { 
-
-            return 1 == dataOffsets.count(entryName);
-        }
     };
 
     uint64_t message::readerPrevSeq = 0;
-}
+
+} // so close ...

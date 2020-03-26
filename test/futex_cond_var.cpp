@@ -3,6 +3,7 @@
 
 int main(int argc, char**) { 
 
+    /*
     pthread_mutex_t mutex = PTHREAD_RECURSIVE_MUTEX_INITIALIZER_NP;
 
     shq::futex_cond_var var;
@@ -18,4 +19,5 @@ int main(int argc, char**) {
     pthread_mutex_unlock(&mutex);
 
     return 0;
+    */
 }
