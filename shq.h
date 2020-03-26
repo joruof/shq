@@ -489,19 +489,12 @@ namespace shq {
 
                     // try to acquire write lock, may block
                     
-                    std::cout << "trying write lock" << std::endl;
-
                     setWriteLock(ptr + sizeof(uint32_t) + sizeof(uint64_t), chunkSize);
 
-                    std::cout << "got write lock" << std::endl;
-                    
                     ring_buffer rb_now = hdr->rb;
-
-                    std::cout << "got ring buffer" << std::endl;
 
                     if (rb_start.end != rb_now.end) {
 
-                        std::cout << "failed acquire write lock" << std::endl;
                         // The ring buffer state has changed.
                         // This means another writer has already written this
                         // chunk, while we were waiting in setWriteLock above.
@@ -510,11 +503,7 @@ namespace shq {
                         rb_start = rb_now;
                         rb = rb_start;
                         clearLock(ptr + sizeof(uint32_t) + sizeof(uint64_t), chunkSize);
-
-                        std::cout << "got header lock again" << std::endl;
                     } 
-
-                    //lockHeader();
                 } else {
                     // no free chunk found, pop the oldest chunk
                     
@@ -603,7 +592,9 @@ namespace shq {
             const ring_buffer rb = hdr->rb;
 
             std::cout << "Segment size: " << usableSize << std::endl;
-            std::cout << "Begin: " << rb.begin << ", end: " << rb.end << ", wrapped:" << rb.wrapped << std::endl;
+            std::cout << "Begin: " << rb.begin
+                      << ", end: " << rb.end
+                      << ", wrapped:" << rb.wrapped << std::endl;
             std::cout << "Found " << cs.size() << " chunks:" << std::endl;
 
             for (chunk& c : cs) {
@@ -812,17 +803,9 @@ namespace shq {
         ~message () {
 
             if (!seg.reader) {
-                //std::cout << "trying commit lock" << std::endl;
-                //seg.lockHeader();
-                //std::cout << "got commit lock" << std::endl;
-                // Wake up all readers first. If we die before
-                // committing the ring buffer, the readers did wake
-                // up for nothing. But at least they did wake up!
-                seg.signalPush();
                 seg.commitTemporaryRingBuffer();
+                seg.signalPush();
                 seg.clearLock(basePtr, size);
-                //seg.unlockHeader();
-                std::cout << "commited changes" << std::endl;
             }
 
             seg.clearLock(basePtr, size);
