@@ -1,30 +1,32 @@
-# SHQ (SHared Queue)
+# shq (shared queue)
 
 A robust, single-header, N-to-N, message queue via shared memory for GNU/Linux.
 
 # Guarantees
 
-SHQ guarantees the following: 
+The way shq is implemented guarantees the following: 
 
 1. All messages are received in the same order they were published.
+2. Any number of subscribers or publisher processes can access the shared memory concurrently without corruption.
+3. While a message is being read by at least one subscriber it will not be modified by any publisher.
+4. Any publisher or subscriber can die at any moment without corrupting the shared memory or stalling other publishers or subscribers.
 
-2. Any number of subscribers or publisher can access the shared memory concurrently without corruption.
+**It is explicity NOT guaranteed that a messages is read by any subscriber
+before being deleted, meaning that subscribers may miss messages.**
 
-3. Any subscriber or publisher can die at any moment without corrupting the shared memory or stalling other publishers or subscribers.
+This means that shq (in its current form) is more similar to UDP than other
+explicitly reliable transport mechanisms, such as TCP.
 
-4. While a message is being read by at least on subscriber it will not be deallocated.
+# Restrictions
 
-5. While a message is being read by at least on subscriber it will not be modified by a publisher.
-
-(unless bugs, obviously)
-
-SHQ does explicity NOT guarantee that:
-
-1. A messages is read by any subscriber before being overwritten.
-   If a subscriber is to slow the message will be overwritten, which is the desired behavior for many realtime applications.
+*  The size of a single shared memory segment is limited to about 2.1 GB (see code)
+*  Only one publisher can write to a shared memory segment at any time.
+   This may limit throughput for applications with lots of concurrent, high-rate
+   publishers operating on the same segment. 
 
 # Interal structure
 
-For allocation SHQ uses a ring buffer. Why a ring buffer and not a more advanced allocator?
-This simplifies dealing with changing message size a lot, which means that also hereogeneous
-message can be exchanged over the same message bus without any issues.
+For allocation shq uses a ring buffer. Why a ring buffer and not a more advanced
+allocator? This simplifies dealing with changing message size a lot, which means
+that also hereogeneous message types can be exchanged over the same message bus
+without any issues.
