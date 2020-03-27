@@ -12,7 +12,7 @@ The way shq is implemented guarantees the following:
 4. Any publisher or subscriber can die at any moment without corrupting the shared memory or stalling other publishers or subscribers.
 
 **It is explicity NOT guaranteed that a messages is read by any subscriber
-before being deleted, meaning that subscribers may miss messages.**
+before being overwritten, meaning that subscribers may miss messages.**
 
 This means that shq (in its current form) is more similar to UDP than other
 explicitly reliable transport mechanisms, such as TCP.
