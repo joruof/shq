@@ -1,6 +1,6 @@
 # shq (shared queue)
 
-A robust, single-header, N-to-N, message queue via shared memory for GNU/Linux.
+A robust, single-header, dynamic, N-to-M message queue in C++ via shared memory for GNU/Linux.
 
 # Guarantees
 
@@ -14,8 +14,7 @@ The way shq is implemented guarantees the following:
 **It is explicity NOT guaranteed that a messages is read by any subscriber
 before being overwritten, meaning that subscribers may miss messages.**
 
-This means that shq (in its current form) is more similar to UDP than other
-explicitly reliable transport mechanisms, such as TCP.
+Though a reliable transport mechanism may be implemented in the future.
 
 # Restrictions
 
