@@ -3,7 +3,7 @@
 
 int main (int, char**) {
 
-    shq::writer writer("shq_counter_demo2", 100, 3);
+    shq::writer writer("shq_test", 100, 3);
 
     writer.destroy();
 
