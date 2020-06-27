@@ -13,7 +13,7 @@ The way shq is implemented **should** (unless bugs) guarantee the following:
 
 \* for basically any reason, e.g. SIGINT, SIGKILL, SIGSEGV, RAM hot unplugged, giraffe, ...
 
-**It is explicity NOT guaranteed that a messages is read by any reader 
+**It is explicity NOT guaranteed that a message is read by any reader 
 before being overwritten, meaning that readers may miss messages.**
 A reliable transport mechanism may be implemented in the future.
 
