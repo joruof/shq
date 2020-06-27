@@ -9,9 +9,9 @@ The way shq is implemented (should) guarantee the following:
 1. All messages are received in the same order they were published.
 2. Any number of reader or writer processes can access the shared memory concurrently without corruption.
 3. While a message is being read/written by at least one reader/writer it will not be modified by any other writers.
-4. Any reader/writer can die[^1] at any moment without corrupting the shared memory or stalling other readers/writers. 
+4. Any reader/writer can die* at any moment without corrupting the shared memory or stalling other readers/writers. 
 
-[^1] (for basically any reason, e.g. SIGINT, SIGKILL, SIGSEGV, RAM hot unplugged, giraffe, ...)
+\* for basically any reason, e.g. SIGINT, SIGKILL, SIGSEGV, RAM hot unplugged, giraffe, ...
 
 **It is explicity NOT guaranteed that a messages is read by any reader 
 before being overwritten, meaning that readers may miss messages.**
