@@ -2,7 +2,7 @@
 
 A robust, single-header, dynamic, N-to-M message queue in C++ via shared memory for GNU/Linux.
 
-# Guarantees
+## Guarantees
 
 The way shq is implemented **should** (unless bugs) guarantee the following: 
 
@@ -17,7 +17,7 @@ The way shq is implemented **should** (unless bugs) guarantee the following:
 before being overwritten, meaning that readers may miss messages.**
 A reliable transport mechanism may be implemented in the future.
 
-# Restrictions
+## Restrictions
 
 *  Currently only one thread per process is allowed. Synchronization for multiple threads is up to the user.
 *  The size of a single shared memory segment is limited to about 2.1 GB (see code)
@@ -27,7 +27,7 @@ A reliable transport mechanism may be implemented in the future.
    This may limit throughput for applications with lots of concurrent, high-rate
    writers operating on the same segment. 
 
-# Disclaimer
+## Disclaimer
 
 Consider this code as early **alpha** version. Expect that it changes.
 Bugs may be present. Things may break. You have been warned.
