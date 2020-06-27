@@ -3,7 +3,7 @@
 #include <random>
 #include <sys/wait.h>
 
-#define SHQ_SEGMENT_NAME "shq_test"
+#define SEGMENT_NAME "test"
 
 struct Config {
 
@@ -20,11 +20,11 @@ void startWriter (Config conf) {
         return;
     }
 
-    std::cout << "[WRITER " << getpid() << "] " << "starting" << std::endl;
+    std::string log = "[WRITER " + std::to_string(getpid()) + "] ";
 
-    shq::writer writer(SHQ_SEGMENT_NAME, 30, 5);
+    shq::writer writer(SEGMENT_NAME, 30, 5);
 
-    std::cout << "[WRITER " << getpid() << "] " << "opened writer" << std::endl;
+    std::cout << log << "opened writer" << std::endl;
 
     shq::definition def = {
             {"i", sizeof(int)},
@@ -44,29 +44,20 @@ void startWriter (Config conf) {
 
             msg.at<int>("i") = i;
 
-            std::cout << 
-                "[WRITER " << getpid() << "] "
-                << "wrote seq "
-                << *msg.chuk.seq
-                << std::endl;
+            std::cout << log << "wrote seq " << msg.seq() << std::endl;
 
             usleep(conf.sleepInsideMsg);
         } else {
             shq::message msg(writer, def_timed);
 
             if (!msg.ok()) {
-                std::cout << "------------------------------- MSG NO OK" << std::endl;
                 continue;
             }
 
             msg.at<int>("i") = i;
             msg.at<int>("time") = 424242;
 
-            std::cout <<
-                "[WRITER " << getpid() << "] "
-                << "wrote seq "
-                << *msg.chuk.seq
-                << std::endl;
+            std::cout << log << "wrote seq " << msg.seq() << std::endl;
 
             usleep(conf.sleepInsideMsg);
         }
@@ -82,11 +73,11 @@ void startReader (Config conf) {
         return;
     }
 
-    std::cout << "[READER " << getpid() << "] " << "starting" << std::endl;
-    
-    shq::reader reader(SHQ_SEGMENT_NAME);
+    std::string log = "[READER " + std::to_string(getpid()) + "] ";
 
-    std::cout << "[READER " << getpid() << "] " << "opened reader " << reader.length() << std::endl;
+    shq::reader reader(SEGMENT_NAME);
+
+    std::cout << log << "opened reader" << std::endl;
 
     uint64_t prev = 0;
 
@@ -96,20 +87,12 @@ void startReader (Config conf) {
 
         shq::message msg(reader);
 
-        if (msg.ok()) {
-        }
-
         if (!msg.ok()) {
-            std::cout << 
-                "[READER " << getpid() <<  "] "
-                << "msg not ok"
-                << std::endl;
+            std::cout << log << "msg not ok" << std::endl;
         }
 
         if (msg.has("time")) {
-            std::cout << 
-                "[READER " << getpid() <<  "] "
-                << "has time: "
+            std::cout << log << "has time: " 
                 << msg.at<int>("time") << std::endl;
 
             if (msg.at<int>("time") != 424242) {
@@ -117,23 +100,15 @@ void startReader (Config conf) {
             }
         }
         if (msg.has("i")) { 
-            std::cout << 
-                "[READER " << getpid() <<  "] "
-                << "seq: "
-                << *msg.chuk.seq 
-                << std::endl;
+            std::cout << log << "seq: " << msg.seq() << std::endl;
         }
         
-        int skip = *msg.chuk.seq - prev;
+        int skip = msg.seq() - prev;
         if (skip > 1) {
-            std::cout << 
-                "[READER " << getpid() <<  "] "
-                "skipped "
-                << skip - 1
-                << std::endl;
+            std::cout << log << "skipped " << skip - 1 << std::endl;
         }
 
-        prev = *msg.chuk.seq;
+        prev = msg.seq();
 
         usleep(conf.sleepInsideMsg);
     }
@@ -174,7 +149,7 @@ int main(int, char**) {
             std::cout << "Process crashed: " << status << std::endl;
             return -1;
         } else {
-            std::cout << "Process exited normally: " << status << std::endl;
+            std::cout << "Process exited normally." << std::endl;
         }
     }
 

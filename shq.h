@@ -11,6 +11,8 @@
 #include <iostream>
 #include <unordered_map>
 
+#define SHQ_SEGMENT_PREFIX "____shq_"
+
 namespace shq {
 
     /*
@@ -87,7 +89,7 @@ namespace shq {
      * This is a lightweight condition variable replacement
      * using Linux futexes and file locks. Not very polished
      * and probably prone to the "thundering herd" effect,
-     * meaning that the cache will be competely trashed, when
+     * meaning that the cache will be completely trashed, when
      * a lot of processes wake up at once and all want to lock
      * the same file_lock.
      */
@@ -228,11 +230,11 @@ namespace shq {
          * blocking:   Whether operations may block or rather return
          *             immediately with error.
          */
-        segment (const char* name, 
+        segment (const std::string name, 
                  const size_t usableSize, 
                  bool reader = true, 
                  bool blocking = true) 
-            : descriptor{shm_open(name, O_RDWR, 0666)},
+            : descriptor{shm_open(name.c_str(), O_RDWR, 0666)},
               size{sizeof(header) + usableSize + sizeof(uint32_t)},
               usableSize{usableSize},
               memory{nullptr},
@@ -248,7 +250,7 @@ namespace shq {
                 openMemory();
             } else {
                 // we need a new segment
-                descriptor = shm_open(name, O_CREAT | O_RDWR, 0666);
+                descriptor = shm_open(name.c_str(), O_CREAT | O_RDWR, 0666);
 
                 if (0 > descriptor) {
                     throw std::runtime_error(
@@ -703,17 +705,17 @@ namespace shq {
      */
 
     struct reader : segment {
-        reader (const char* name, bool blocking = true)
-            : segment(name, 0, true, blocking) { }
+        reader (std::string name, bool blocking = true)
+            : segment(SHQ_SEGMENT_PREFIX + name, 0, true, blocking) { }
     };
 
     struct writer : segment {
 
-        writer (const char* name,
+        writer (std::string name,
                 const size_t maxMsgSize,
                 const size_t queueSize,
                 bool blocking = true)
-            : segment(name, 
+            : segment(SHQ_SEGMENT_PREFIX + name, 
                     (maxMsgSize + chunk::headerSize) * queueSize,
                     false,
                     blocking) {
@@ -745,22 +747,23 @@ namespace shq {
         // is also set if an error occurs
         bool isOk = true;
 
-    public:
+        // the chunk in shared memory of this message
+        chunk ch;
 
-        chunk chuk;
+    public:
 
         message (reader& rdr) : seg{rdr} { 
 
-            if (!seg.get(readerPrevSeq, chuk)) {
+            if (!seg.get(readerPrevSeq, ch)) {
                 isOk = false;
                 return;
             }
 
-            readerPrevSeq = *chuk.seq;
+            readerPrevSeq = *ch.seq;
 
-            uint8_t* ptr = chuk.data;
+            uint8_t* ptr = ch.data;
 
-            while (ptr - chuk.data < (long int)*chuk.size) { 
+            while (ptr - ch.data < (long int)*ch.size) { 
 
                 // read name size
                 uint8_t entryNameLen = *ptr;
@@ -775,7 +778,7 @@ namespace shq {
                 ptr += sizeof(uint32_t);
 
                 // read data offset relative to buffer start
-                dataOffsets[entryName] = ptr - chuk.data;
+                dataOffsets[entryName] = ptr - ch.data;
                 ptr += entryDataLen;
             }
         }
@@ -799,13 +802,13 @@ namespace shq {
 
             // try to allocate chunk, may block until memory available
     
-            if (!seg.alloc(size, chuk)) {
+            if (!seg.alloc(size, ch)) {
                 // in non-blocking mode or message too large
                 isOk = false;
                 return;
             }
 
-            uint8_t* ptr = chuk.data;
+            uint8_t* ptr = ch.data;
 
             // initialize frame in chunk to hold data
 
@@ -828,7 +831,7 @@ namespace shq {
                 ptr += sizeof(uint32_t);
 
                 // store offset to buffer start
-                dataOffsets[entryName] = ptr - chuk.data;
+                dataOffsets[entryName] = ptr - ch.data;
                 ptr += entryDataLen;
             }
         }
@@ -840,7 +843,7 @@ namespace shq {
                     seg.commit();
                 }
 
-                seg.clearLock(chuk);
+                seg.clearLock(ch);
             }
         }
 
@@ -849,10 +852,20 @@ namespace shq {
             return isOk;
         }
 
+        uint32_t size () {
+
+            return *ch.size;
+        }
+
+        uint64_t seq () {
+
+            return *ch.seq;
+        }
+
         template<typename T>
         T& at (std::string entryName) {
 
-            return (T&) *(chuk.data + dataOffsets.at(entryName));
+            return (T&) *(ch.data + dataOffsets.at(entryName));
         }
 
         bool has (std::string entryName) { 

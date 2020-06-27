@@ -1,11 +1,9 @@
-#include <iostream> 
 #include "shq.h"
 
 int main (int, char**) {
 
-    shq::writer writer("shq_test", 100, 3);
-
-    writer.destroy();
+    shq::reader reader("shq_test");
+    reader.destroy();
 
     return 0;
 }
