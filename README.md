@@ -1,6 +1,6 @@
 # shq (shared queue)
 
-A robust, single-header, dynamic, N-to-M message queue in C++ via shared memory for GNU/Linux.
+A robust, single-header, dynamic, N-to-M message queue in C++11 via shared memory for GNU/Linux.
 
 ## Guarantees
 
