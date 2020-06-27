@@ -15,8 +15,7 @@ The way shq is implemented (should) guarantee the following:
 
 **It is explicity NOT guaranteed that a messages is read by any reader 
 before being overwritten, meaning that readers may miss messages.**
-
-Though a reliable transport mechanism may be implemented in the future.
+A reliable transport mechanism may be implemented in the future.
 
 # Restrictions
 
