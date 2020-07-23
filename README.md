@@ -2,6 +2,87 @@
 
 A robust, single-header, dynamic, N-to-M message queue in C++11 via shared memory for GNU/Linux.
 
+## Usage
+
+Usage is best demonstrated by example. This example consists of a writer,
+which writes a message to a shared queue, and a reader which reads and prints the message.
+
+### Writer
+
+```C++
+#include "shq.h"
+
+int main () {
+
+    const size_t segmentSize = 512;
+
+    shq::writer writer("test_segment_name", segmentSize);
+
+    std::string text = "Hello, World!";
+    double number = 3.141592;
+
+    shq::definition def{
+        {"text", text.size()},
+        {"number", sizeof(number)},
+    };
+
+    // messages use RAII for synchronization
+    // message is send in destructor
+    {
+        shq::message msg(writer, def);
+
+        text.copy(msg.ptr<char>("text"), text.size());
+        msg.at<double>("number") = number;
+    }
+}
+```
+
+### Reader
+
+```C++
+#include "shq.h"
+
+int main () {
+
+    shq::reader reader("test_segment_name");
+
+    shq::message msg(reader);
+
+    if (msg.ok()) {
+
+        double number = msg.at<double>("number");
+        std::string text(msg.ptr<char>("text"), msg.entrySize("text"));
+
+        std::cout << "Number is: " << number << std::endl;
+        std::cout << "Text is: " << text << std::endl;
+    }
+
+    reader.destroy();
+}
+```
+To run the examples build via the cmake file in the project root directory:
+
+```
+> mkdir build
+> cd build
+> cmake ..
+> make
+```
+
+Then execute the respective example binaries. First the writer
+
+```
+> ./build/example_writer
+```
+
+then the reader.
+
+```
+> ./build/example/reader
+< Number is: 3.141592
+< Text is: Hello, World!
+```
+
 ## Guarantees
 
 The way shq is implemented **should** (unless bugs) guarantee the following: 
