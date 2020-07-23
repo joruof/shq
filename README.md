@@ -78,7 +78,7 @@ Then execute the respective example binaries. First the writer
 then the reader.
 
 ```
-> ./build/example/reader
+> ./build/example_reader
 < Number is: 3.141592
 < Text is: Hello, World!
 ```
