@@ -712,11 +712,10 @@ namespace shq {
     struct writer : segment {
 
         writer (std::string name,
-                const size_t maxMsgSize,
-                const size_t queueSize,
+                const size_t s,
                 bool blocking = true)
             : segment(SHQ_SEGMENT_PREFIX + name, 
-                    (maxMsgSize + chunk::headerSize) * queueSize,
+                    chunk::headerSize + s,
                     false,
                     blocking) {
             }
@@ -738,6 +737,9 @@ namespace shq {
         // stores the offset from the beginning of the message
         // memory chunk for the corresponding field name
         std::unordered_map<std::string, size_t> dataOffsets;
+
+        // store the length of the data field in bytes
+        std::unordered_map<std::string, size_t> entryDataLength;
 
         // reference to the shared memory segment
         segment& seg;
@@ -776,6 +778,7 @@ namespace shq {
                 // read data size
                 uint32_t entryDataLen = *(uint32_t*)ptr;
                 ptr += sizeof(uint32_t);
+                entryDataLength[entryName] = entryDataLen;
 
                 // read data offset relative to buffer start
                 dataOffsets[entryName] = ptr - ch.data;
@@ -829,6 +832,7 @@ namespace shq {
                 // write data size 
                 *(uint32_t*)ptr = entryDataLen;
                 ptr += sizeof(uint32_t);
+                entryDataLength[entryName] = entryDataLen;
 
                 // store offset to buffer start
                 dataOffsets[entryName] = ptr - ch.data;
@@ -857,6 +861,11 @@ namespace shq {
             return *ch.size;
         }
 
+        uint32_t entrySize (std::string entryName) {
+
+            return entryDataLength[entryName];
+        }
+
         uint64_t seq () {
 
             return *ch.seq;
@@ -866,6 +875,12 @@ namespace shq {
         T& at (std::string entryName) {
 
             return (T&) *(ch.data + dataOffsets.at(entryName));
+        }
+
+        template<typename T>
+        T* ptr (std::string entryName) {
+
+            return (T*)(ch.data + dataOffsets.at(entryName));
         }
 
         bool has (std::string entryName) { 

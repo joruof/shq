@@ -1,7 +1,11 @@
-#include "shq.h"
-
 #include <random>
 #include <sys/wait.h>
+
+#include "shq.h"
+
+/**
+ * This is a very hacky sorta fuzzy test.
+ */
 
 #define SEGMENT_NAME "test"
 
@@ -22,7 +26,7 @@ void startWriter (Config conf) {
 
     std::string log = "[WRITER " + std::to_string(getpid()) + "] ";
 
-    shq::writer writer(SEGMENT_NAME, 30, 5);
+    shq::writer writer(SEGMENT_NAME, 150);
 
     std::cout << log << "opened writer" << std::endl;
 
