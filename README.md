@@ -101,7 +101,7 @@ A reliable transport mechanism may be implemented in the future.
 ## Restrictions
 
 *  Currently only one thread per process is allowed. Synchronization for multiple threads is up to the user.
-*  The size of a single shared memory segment is limited to about 2.1 GB (see code)
+*  The size of a single shared memory segment is limited to about 2.1 GB (see [code](https://github.com/joruof/shq/blob/e730f94ffd83767b45d4d5c285c757fb197b8503/shq.h#L124))
 *  Only one writer can write to a shared memory segment at any time.
    Still multiple writers may be opened and write sequentially to the same segment.
    Other writers will simply block until the current writer finishes. 
