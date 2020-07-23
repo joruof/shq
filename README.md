@@ -5,7 +5,7 @@ A robust, single-header, dynamic, N-to-M message queue in C++11 via shared memor
 ## Usage
 
 Usage is best demonstrated by example. This example consists of a writer,
-which writes a message to a shared queue, and a reader which reads and prints the message.
+which writes a message to a shared queue, and a reader, which reads and prints the message.
 
 ### Writer
 
